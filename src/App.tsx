@@ -130,6 +130,7 @@ function AppContent() {
   const [appUser, setAppUser] = useState<AppUser | null>(initialCachedUser);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [unauthorizedDomain, setUnauthorizedDomain] = useState('');
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('subjects');
   const [subjects, setSubjects] = useState<Record<string, SubjectDoc>>(() =>
@@ -322,18 +323,61 @@ function AppContent() {
       .catch(() => {});
   }, [appUser?.uid]);
 
+  const applyGoogleAuthError = useCallback((err: unknown) => {
+    const code = (err as { code?: string } | null)?.code || '';
+    setUnauthorizedDomain('');
+    if (code === 'auth/cancelled-popup-request' || code === 'auth/no-current-user') {
+      return;
+    }
+    if (code === 'auth/popup-closed-by-user') {
+      setAuthError('Google সাইন-ইন পপআপটি বন্ধ হয়ে গেছে। আবার চেষ্টা করুন।');
+    } else if (code === 'auth/popup-blocked') {
+      setAuthError('ব্রাউজারে পপআপ ব্লক করা আছে। পপআপ অনুমতি দিয়ে আবার চেষ্টা করুন।');
+    } else if (code === 'auth/network-request-failed') {
+      setAuthError('ইন্টারনেট সংযোগে সমস্যা। নেটওয়ার্ক পরীক্ষা করে আবার চেষ্টা করুন।');
+    } else if (code === 'auth/unauthorized-domain') {
+      const host = window.location.hostname;
+      setUnauthorizedDomain(host);
+      setAuthError(
+        `এই ডোমেইনটি (${host}) Firebase Authorized Domains এ যোগ করা নেই।`
+      );
+    } else {
+      setAuthError(
+        err instanceof Error
+          ? `Google লগইন ব্যর্থ হয়েছে: ${err.message}`
+          : 'Google দিয়ে লগইন করা যায়নি। আবার চেষ্টা করুন।'
+      );
+    }
+  }, []);
+
   // Listen to Firebase Auth state & resolve any standalone redirect sign-in on mount
   useEffect(() => {
-    getRedirectResult(auth).catch((err: unknown) => {
-      const code = (err as { code?: string } | null)?.code || '';
-      if (code && code !== 'auth/no-current-user') {
-        setAuthError(
-          err instanceof Error
-            ? err.message
-            : 'Google দিয়ে লগইন সম্পন্ন করা যায়নি।'
-        );
+    const hasPendingRedirect = (() => {
+      try {
+        return sessionStorage.getItem('noor_elahi_redirect_pending') === '1';
+      } catch {
+        return false;
       }
-    });
+    })();
+
+    if (hasPendingRedirect) {
+      setAuthLoading(true);
+    }
+
+    getRedirectResult(auth)
+      .catch((err: unknown) => {
+        applyGoogleAuthError(err);
+      })
+      .finally(() => {
+        try {
+          sessionStorage.removeItem('noor_elahi_redirect_pending');
+        } catch {
+          // Ignore storage error
+        }
+        if (hasPendingRedirect) {
+          setAuthLoading(false);
+        }
+      });
 
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
@@ -695,6 +739,7 @@ function AppContent() {
     photoUrl: string;
   }) => {
     setAuthError('');
+    setUnauthorizedDomain('');
     setAuthLoading(true);
     try {
       try {
@@ -719,37 +764,30 @@ function AppContent() {
       if (
         (code === 'auth/popup-blocked' ||
           code === 'auth/operation-not-supported-in-this-environment' ||
-          code === 'auth/web-storage-unsupported') &&
+          code === 'auth/web-storage-unsupported' ||
+          code === 'auth/internal-error') &&
         (isStandalonePWA || isTopLevelWindow)
       ) {
+        try {
+          sessionStorage.setItem('noor_elahi_redirect_pending', '1');
+        } catch {
+          // Ignore storage error
+        }
         try {
           await signInWithRedirect(auth, googleProvider);
           return;
         } catch (redirErr) {
-          const rCode = (redirErr as { code?: string } | null)?.code || '';
-          setAuthError(`Google লগইন করা যায়নি (${rCode || 'redirect_error'})।`);
+          try {
+            sessionStorage.removeItem('noor_elahi_redirect_pending');
+          } catch {
+            // Ignore
+          }
+          applyGoogleAuthError(redirErr);
           return;
         }
       }
 
-      if (code === 'auth/cancelled-popup-request') {
-        return;
-      }
-      if (code === 'auth/popup-closed-by-user') {
-        setAuthError('Google সাইন-ইন পপআপটি বন্ধ হয়ে গেছে। আবার চেষ্টা করুন।');
-      } else if (code === 'auth/popup-blocked') {
-        setAuthError('ব্রাউজারে পপআপ ব্লক করা আছে। পপআপ অনুমতি দিয়ে আবার চেষ্টা করুন।');
-      } else if (code === 'auth/network-request-failed') {
-        setAuthError('ইন্টারনেট সংযোগে সমস্যা। নেটওয়ার্ক পরীক্ষা করে আবার চেষ্টা করুন।');
-      } else if (code === 'auth/unauthorized-domain') {
-        setAuthError(`এই ডোমেইনটি (${window.location.hostname}) অনুমোদিত নয়।`);
-      } else {
-        setAuthError(
-          err instanceof Error
-            ? `Google লগইন ব্যর্থ হয়েছে: ${err.message}`
-            : 'Google দিয়ে লগইন করা যায়নি। আবার চেষ্টা করুন।'
-        );
-      }
+      applyGoogleAuthError(err);
     } finally {
       setAuthLoading(false);
     }
@@ -1046,10 +1084,13 @@ function AppContent() {
 
     if (appUser?.authMode === 'google' && firebaseUser) {
       const path = `users/${firebaseUser.uid}/downloads/${itemId}`;
-      try {
-        await deleteDoc(doc(db, 'users', firebaseUser.uid, 'downloads', itemId));
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, path);
+      const deleteOp = deleteDoc(
+        doc(db, 'users', firebaseUser.uid, 'downloads', itemId)
+      ).catch((err) => {
+        handleListenerErrorSafe(err, OperationType.DELETE, path);
+      });
+      if (navigator.onLine) {
+        await deleteOp;
       }
     } else if (appUser?.authMode === 'number' && appUser.bearerToken) {
       fetch('/api/number-user/state', {
@@ -1171,6 +1212,7 @@ function AppContent() {
           onNumberLogin={handleNumberLogin}
           authLoading={authLoading}
           authError={authError}
+          unauthorizedDomain={unauthorizedDomain}
         />
       ) : (
         <div className="h-[100dvh] w-full bg-[#020617] text-slate-100 flex flex-col overflow-hidden overscroll-none">

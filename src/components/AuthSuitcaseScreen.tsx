@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Camera, Chrome, Lock, Phone, User, WifiOff } from 'lucide-react';
+import { Camera, Check, Chrome, Copy, Lock, Phone, User, WifiOff } from 'lucide-react';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 
 interface AuthSuitcaseScreenProps {
@@ -13,6 +13,7 @@ interface AuthSuitcaseScreenProps {
   }) => Promise<void>;
   authLoading: boolean;
   authError: string;
+  unauthorizedDomain?: string;
 }
 
 const SAVED_PROFILE_HINT_KEY = 'noor_elahi_login_hint_v1';
@@ -59,6 +60,7 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
   onNumberLogin,
   authLoading,
   authError,
+  unauthorizedDomain,
 }) => {
   const isOnline = useOnlineStatus();
   const [suitcaseOpen, setSuitcaseOpen] = useState(true);
@@ -67,6 +69,7 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [photoUrl, setPhotoUrl] = useState('');
+  const [copiedDomain, setCopiedDomain] = useState(false);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setSuitcaseOpen(true), 600);
@@ -318,8 +321,33 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
           </AnimatePresence>
 
           {authError && (
-            <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-300">
-              {authError}
+            <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-200 space-y-2">
+              <p className="leading-relaxed">{authError}</p>
+              {unauthorizedDomain && (
+                <div className="rounded-lg bg-slate-950/90 border border-slate-800 p-2.5 space-y-2 text-[11px] text-slate-300">
+                  <div className="flex items-center justify-between gap-2">
+                    <code className="font-mono-num text-emerald-300 truncate">
+                      {unauthorizedDomain}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(unauthorizedDomain).then(() => {
+                          setCopiedDomain(true);
+                          window.setTimeout(() => setCopiedDomain(false), 2000);
+                        }).catch(() => {});
+                      }}
+                      className="shrink-0 inline-flex items-center gap-1 rounded-md bg-emerald-500/15 border border-emerald-500/30 px-2 py-1 text-[10px] font-semibold text-emerald-300"
+                    >
+                      {copiedDomain ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedDomain ? 'কপি হয়েছে' : 'কপি'}</span>
+                    </button>
+                  </div>
+                  <p className="text-slate-400 leading-relaxed">
+                    Firebase Console → Authentication → Settings → Authorized domains এ এই ডোমেইনটি যোগ করলে পুনরায় আপডেট ছাড়াই Google লগইন চালু হবে।
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

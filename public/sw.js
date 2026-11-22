@@ -1,5 +1,5 @@
-const CACHE_NAME = 'noor-elahi-v6';
-const FONT_CACHE = 'noor-elahi-fonts-v6';
+const CACHE_NAME = 'noor-elahi-v7';
+const FONT_CACHE = 'noor-elahi-fonts-v7';
 
 const CORE_SHELL_ASSETS = [
   '/',
@@ -32,6 +32,7 @@ const BYPASS_ORIGINS = [
   'firebaseinstallations.googleapis.com',
   'www.googletagmanager.com',
   'www.google-analytics.com',
+  'www.gstatic.com',
   'noor-elahi-84e9a.firebaseapp.com',
 ];
 
@@ -274,6 +275,7 @@ self.addEventListener('fetch', (event) => {
 
       const isImmutableOrStatic =
         url.pathname.startsWith('/assets/') ||
+        url.pathname.startsWith('/node_modules/.vite/deps/') ||
         url.pathname.startsWith('/icon') ||
         url.pathname.startsWith('/maskable') ||
         url.pathname.startsWith('/apple-touch-icon') ||
@@ -293,7 +295,7 @@ self.addEventListener('fetch', (event) => {
       }
 
       try {
-        const netRes = await fetchWithTimeout(request, exactCached ? 4500 : 15000);
+        const netRes = await fetchWithTimeout(request, exactCached ? 2000 : 15000);
         if (netRes && netRes.ok) {
           await cache.put(request, netRes.clone());
         }
