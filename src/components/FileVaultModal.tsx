@@ -108,6 +108,10 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
   };
 
   const addSectionBox = () => {
+    if (draftSections.length >= 40) {
+      setSaveMessage('সর্বোচ্চ ৪০টি শিরোনাম বক্স যোগ করা যাবে।');
+      return;
+    }
     setDraftSections((prev) => [
       ...prev,
       {

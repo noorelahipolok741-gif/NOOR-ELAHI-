@@ -1,30 +1,23 @@
-const CACHE_NAME = 'noor-elahi-v4';
-const FONT_CACHE = 'noor-elahi-fonts-v4';
+const CACHE_NAME = 'noor-elahi-v6';
+const FONT_CACHE = 'noor-elahi-fonts-v6';
 
 const CORE_SHELL_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
-  '/manifest.json?v=4',
-  '/manifest.json?v=3',
+  '/manifest.json?v=5',
   '/icon-192.png',
-  '/icon-192.png?v=4',
-  '/icon-192.png?v=3',
+  '/icon-192.png?v=5',
   '/icon-512.png',
-  '/icon-512.png?v=4',
-  '/icon-512.png?v=3',
+  '/icon-512.png?v=5',
   '/maskable-icon-512.png',
-  '/maskable-icon-512.png?v=4',
-  '/maskable-icon-512.png?v=3',
+  '/maskable-icon-512.png?v=5',
   '/apple-touch-icon.png',
-  '/apple-touch-icon.png?v=4',
-  '/apple-touch-icon.png?v=3',
+  '/apple-touch-icon.png?v=5',
   '/favicon.svg',
-  '/favicon.svg?v=4',
-  '/favicon.svg?v=3',
+  '/favicon.svg?v=5',
   '/icon.svg',
-  '/icon.svg?v=4',
-  '/icon.svg?v=3',
+  '/icon.svg?v=5',
   '/plyr.svg',
 ];
 
@@ -39,6 +32,7 @@ const BYPASS_ORIGINS = [
   'firebaseinstallations.googleapis.com',
   'www.googletagmanager.com',
   'www.google-analytics.com',
+  'noor-elahi-84e9a.firebaseapp.com',
 ];
 
 function extractAssetsFromHtml(htmlText, baseUrl) {
@@ -76,7 +70,6 @@ async function precacheAppShell() {
     })
   );
 
-  // Also fetch root HTML and precache referenced JS/CSS chunks immediately
   try {
     const htmlRes = await fetch('/', { cache: 'no-store' });
     if (htmlRes.ok) {
@@ -145,7 +138,7 @@ self.addEventListener('message', (event) => {
             try {
               const url = new URL(String(rawUrl), self.location.origin);
               if (url.origin !== self.location.origin) return;
-              if (url.pathname.startsWith('/api/')) return;
+              if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/__/')) return;
               const reqKey = url.pathname + url.search;
               const existing = await cache.match(reqKey);
               if (existing) return;
@@ -209,15 +202,15 @@ self.addEventListener('fetch', (event) => {
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
 
-  // Never intercept backend APIs, Auth, or Firestore network endpoints
-  if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) {
+  // Never intercept backend APIs, Auth handlers, or Firebase endpoints
+  if (url.origin === self.location.origin && (url.pathname.startsWith('/api/') || url.pathname.startsWith('/__/'))) {
     return;
   }
   if (BYPASS_ORIGINS.some((host) => url.hostname === host || url.hostname.endsWith('.' + host))) {
     return;
   }
 
-  // Google Fonts: CacheFirst + clean empty CSS fallback offline so stylesheet link never breaks
+  // Google Fonts: CacheFirst + clean empty CSS fallback offline
   if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
     event.respondWith(
       (async () => {
@@ -225,7 +218,7 @@ self.addEventListener('fetch', (event) => {
         const cached = await fontCache.match(request);
         if (cached) return cached;
         try {
-          const res = await fetchWithTimeout(request, 4000);
+          const res = await fetchWithTimeout(request, 5000);
           if (res && (res.ok || res.type === 'opaque')) {
             await fontCache.put(request, res.clone());
           }
@@ -241,7 +234,6 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Only handle same-origin app requests from here on
   if (url.origin !== self.location.origin) return;
 
   // Navigation requests (HTML shell)
@@ -249,8 +241,13 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       (async () => {
         const cache = await caches.open(CACHE_NAME);
+        const cachedNav =
+          (await cache.match(request)) ||
+          (await cache.match(request, { ignoreSearch: true })) ||
+          (await cache.match('/')) ||
+          (await cache.match('/index.html'));
         try {
-          const netRes = await fetchWithTimeout(request, 3500);
+          const netRes = await fetchWithTimeout(request, cachedNav ? 1800 : 12000);
           if (netRes && netRes.ok) {
             const ct = (netRes.headers.get('content-type') || '').toLowerCase();
             if (ct.includes('text/html')) {
@@ -261,13 +258,7 @@ self.addEventListener('fetch', (event) => {
           }
           return netRes;
         } catch {
-          return (
-            (await cache.match(request)) ||
-            (await cache.match(request, { ignoreSearch: true })) ||
-            (await cache.match('/')) ||
-            (await cache.match('/index.html')) ||
-            offlineFallbackPage()
-          );
+          return cachedNav || offlineFallbackPage();
         }
       })()
     );
@@ -275,7 +266,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Same-origin JS/CSS/TSX/SVG/PNG/JSON assets
-  // CRITICAL: NEVER fall back to '/' HTML for JS/CSS modules (that causes MIME errors & white screen!)
+  // NEVER fall back to '/' HTML for JS/CSS modules
   event.respondWith(
     (async () => {
       const cache = await caches.open(CACHE_NAME);
@@ -291,7 +282,6 @@ self.addEventListener('fetch', (event) => {
         url.pathname === '/manifest.json';
 
       if (isImmutableOrStatic && exactCached) {
-        // Stale-while-revalidate for static assets & manifest
         fetch(request)
           .then((fresh) => {
             if (fresh && fresh.ok) {
@@ -303,7 +293,7 @@ self.addEventListener('fetch', (event) => {
       }
 
       try {
-        const netRes = await fetchWithTimeout(request, 4500);
+        const netRes = await fetchWithTimeout(request, exactCached ? 4500 : 15000);
         if (netRes && netRes.ok) {
           await cache.put(request, netRes.clone());
         }

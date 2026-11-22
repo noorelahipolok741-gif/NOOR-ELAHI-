@@ -21,7 +21,7 @@ export class ErrorBoundary extends React.Component<
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-[#020617] text-slate-100 flex items-center justify-center p-6">
+        <div className="h-[100dvh] w-full overflow-y-auto overscroll-none bg-[#020617] text-slate-100 flex items-center justify-center p-6">
           <div className="max-w-md w-full rounded-2xl bg-slate-900 border border-slate-800 p-6 text-center space-y-4">
             <h2 className="text-lg font-semibold text-white">কিছু একটা সমস্যা হয়েছে</h2>
             <p className="text-sm text-slate-400 break-words">

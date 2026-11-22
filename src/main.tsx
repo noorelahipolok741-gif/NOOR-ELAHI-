@@ -52,7 +52,7 @@ if (typeof window !== 'undefined') {
       const dy = e.touches[0].clientY - touchStartY;
       const dx = e.touches[0].clientX - touchStartX;
       // Block vertical downward pull-to-refresh when already at scrollTop <= 0 or outside a scrollable box
-      if (dy > 6 && Math.abs(dy) > Math.abs(dx)) {
+      if (dy > 12 && Math.abs(dy) > Math.abs(dx)) {
         const scroller = findScrollableParent(e.target);
         if (!scroller || scroller.scrollTop <= 0) {
           e.preventDefault();
@@ -105,6 +105,9 @@ function warmServiceWorkerCache(sw: ServiceWorker | null | undefined) {
 }
 
 if ('serviceWorker' in navigator) {
+  const bootTime = Date.now();
+  const hadController = Boolean(navigator.serviceWorker.controller);
+
   window.addEventListener('load', () => {
     navigator.serviceWorker
       .register('/sw.js', { scope: '/' })
@@ -112,6 +115,16 @@ if ('serviceWorker' in navigator) {
         if (reg.active) {
           warmServiceWorkerCache(reg.active);
         }
+        reg.update().catch(() => {});
+
+        let lastUpdateCheck = Date.now();
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible' && navigator.onLine && Date.now() - lastUpdateCheck > 60_000) {
+            lastUpdateCheck = Date.now();
+            reg.update().catch(() => {});
+          }
+        });
+
         reg.addEventListener('updatefound', () => {
           const installing = reg.installing;
           if (!installing) return;
@@ -130,6 +143,25 @@ if ('serviceWorker' in navigator) {
 
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       warmServiceWorkerCache(navigator.serviceWorker.controller);
+      // Seamlessly apply updated app shell when an existing PWA updates to a newer version
+      const isPlayingVideo = Array.from(document.querySelectorAll('video')).some(
+        (v) => !v.paused && !v.ended
+      );
+      const isOAuthCallback =
+        /[?&#](code|state|apiKey|mode|oobCode|__firebase)=/i.test(
+          window.location.search + window.location.hash
+        );
+      const reloadedOnce = sessionStorage.getItem('noor_elahi_sw_reloaded') === '1';
+      if (
+        hadController &&
+        !reloadedOnce &&
+        !isPlayingVideo &&
+        !isOAuthCallback &&
+        Date.now() - bootTime < 20_000
+      ) {
+        sessionStorage.setItem('noor_elahi_sw_reloaded', '1');
+        window.location.reload();
+      }
     });
   });
 }

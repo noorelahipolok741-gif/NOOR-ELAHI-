@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Camera,
   Check,
@@ -80,6 +80,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState('');
 
+  useEffect(() => {
+    if (!editing) {
+      setNameInput(user.name);
+      setPhotoInput(user.photoUrl);
+    }
+  }, [user.name, user.photoUrl, editing]);
+
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -88,9 +95,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       setPhotoInput(dataUrl);
       if (!editing) {
         setSaving(true);
-        await onUpdateProfile({ name: user.name, photoUrl: dataUrl });
-        setFeedback('প্রোফাইল ছবি আপডেট হয়েছে।');
-        setSaving(false);
+        try {
+          await onUpdateProfile({ name: user.name, photoUrl: dataUrl });
+          setFeedback('প্রোফাইল ছবি আপডেট হয়েছে।');
+        } finally {
+          setSaving(false);
+        }
       }
     } catch {
       setFeedback('ছবি আপলোড করা যায়নি।');

@@ -38,6 +38,8 @@ interface DownloadsViewProps {
   subjects: Record<string, SubjectDoc>;
   downloads: Record<string, DownloadRecord>;
   downloadTasks: Record<string, DownloadTask>;
+  isOnline: boolean;
+  onOfflineAlert: () => void;
   onPlayDownloaded: (record: DownloadRecord) => void;
   onOpenDownloadedPdf: (record: DownloadRecord) => void;
   onDeleteDownload: (itemId: string) => Promise<void>;
@@ -54,6 +56,8 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
   subjects,
   downloads,
   downloadTasks,
+  isOnline,
+  onOfflineAlert,
   onPlayDownloaded,
   onOpenDownloadedPdf,
   onDeleteDownload,
@@ -407,8 +411,15 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                   <div className="grid grid-cols-2 gap-2.5">
                     <button
                       type="button"
-                      onClick={() => onPlayDownloaded(rec)}
-                      className="rounded-2xl bg-gradient-to-br from-emerald-600/25 via-teal-600/20 to-cyan-600/25 border border-emerald-400/35 hover:border-emerald-400/70 p-3.5 flex items-center justify-center gap-2 text-emerald-200 font-semibold text-xs sm:text-sm active:scale-[0.98] transition"
+                      disabled={!rec.videoUrl && !rec.hasLocalVideo}
+                      onClick={() => {
+                        if (!isOnline && !rec.hasLocalVideo) {
+                          onOfflineAlert();
+                          return;
+                        }
+                        onPlayDownloaded(rec);
+                      }}
+                      className="rounded-2xl bg-gradient-to-br from-emerald-600/25 via-teal-600/20 to-cyan-600/25 border border-emerald-400/35 hover:border-emerald-400/70 p-3.5 flex items-center justify-center gap-2 text-emerald-200 font-semibold text-xs sm:text-sm active:scale-[0.98] transition disabled:opacity-40"
                     >
                       <Video className="w-4 h-4 text-emerald-400 shrink-0" />
                       <span>ভিডিও দেখুন</span>
@@ -417,7 +428,13 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                     <button
                       type="button"
                       disabled={!rec.pdfUrl && !rec.hasLocalPdf}
-                      onClick={() => onOpenDownloadedPdf(rec)}
+                      onClick={() => {
+                        if (!isOnline && !rec.hasLocalPdf) {
+                          onOfflineAlert();
+                          return;
+                        }
+                        onOpenDownloadedPdf(rec);
+                      }}
                       className="rounded-2xl bg-gradient-to-br from-indigo-600/25 via-violet-600/20 to-purple-600/25 border border-indigo-400/35 hover:border-indigo-400/70 p-3.5 flex items-center justify-center gap-2 text-indigo-200 font-semibold text-xs sm:text-sm active:scale-[0.98] transition disabled:opacity-40"
                     >
                       <FileText className="w-4 h-4 text-indigo-300 shrink-0" />

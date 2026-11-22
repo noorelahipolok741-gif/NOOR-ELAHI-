@@ -325,32 +325,28 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
 
           {/* Two Floating Login Options */}
           <div className="grid grid-cols-1 gap-3 pt-1">
-            <motion.button
-              whileHover={{ scale: 1.01 }}
-              whileTap={{ scale: 0.98 }}
+            <button
               type="button"
               disabled={authLoading}
               onClick={() => {
                 persistHint();
                 onGoogleLogin({ name, password, photoUrl });
               }}
-              className="w-full h-12 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm flex items-center justify-center gap-2.5 shadow-lg shadow-emerald-500/20 disabled:opacity-60"
+              className="w-full h-12 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm flex items-center justify-center gap-2.5 shadow-lg shadow-emerald-500/20 active:scale-[0.98] transition disabled:opacity-60"
             >
               <Chrome className="w-4 h-4 shrink-0" />
               <span>সাইন ইন উইথ গুগল</span>
-            </motion.button>
+            </button>
 
-            <motion.button
-              whileHover={{ scale: 1.01 }}
-              whileTap={{ scale: 0.98 }}
+            <button
               type="button"
               disabled={authLoading}
               onClick={() => setShowNumberForm((v) => !v)}
-              className="w-full h-12 rounded-2xl bg-slate-950 border border-slate-700 hover:border-cyan-500/50 text-slate-100 font-semibold text-sm flex items-center justify-center gap-2.5 transition"
+              className="w-full h-12 rounded-2xl bg-slate-950 border border-slate-700 hover:border-cyan-500/50 text-slate-100 font-semibold text-sm flex items-center justify-center gap-2.5 active:scale-[0.98] transition"
             >
               <Phone className="w-4 h-4 text-cyan-400 shrink-0" />
               <span>{showNumberForm ? 'নাম্বার বক্স লুকান' : 'সাইন ইন উইথ নাম্বার'}</span>
-            </motion.button>
+            </button>
           </div>
         </motion.div>
       </div>

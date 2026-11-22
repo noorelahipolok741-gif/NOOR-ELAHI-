@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   User as FirebaseUser,
 } from 'firebase/auth';
@@ -255,23 +257,22 @@ function AppContent() {
       if (appUser) {
         if (appUser.authMode === 'google' && firebaseUser) {
           const path = `users/${firebaseUser.uid}/downloads`;
-          try {
-            await setDoc(doc(db, path, record.itemId), {
-              uid: firebaseUser.uid,
-              itemId: record.itemId,
-              subjectId: record.subjectId,
-              sectionId: record.sectionId,
-              sectionTitle: (record.sectionTitle || 'ক্লাস').slice(0, 160),
-              classNumber: Math.max(1, Number(record.classNumber) || 1),
-              videoName: (record.videoName || 'ক্লাস').slice(0, 200),
-              videoUrl: (record.videoUrl || '').slice(0, 1000),
-              pdfUrl: (record.pdfUrl || '').slice(0, 1000),
-              fileSizeBytes: Math.max(0, Number(record.fileSizeBytes) || 0),
-              downloadedAt: serverTimestamp(),
-            });
-          } catch (err) {
-            handleFirestoreError(err, OperationType.WRITE, `${path}/${record.itemId}`);
-          }
+          const docPayload = {
+            uid: firebaseUser.uid,
+            itemId: record.itemId,
+            subjectId: record.subjectId,
+            sectionId: record.sectionId,
+            sectionTitle: (record.sectionTitle || 'ক্লাস').slice(0, 160),
+            classNumber: Math.max(1, Number(record.classNumber) || 1),
+            videoName: (record.videoName || 'ক্লাস').slice(0, 200),
+            videoUrl: (record.videoUrl || '').slice(0, 1000),
+            pdfUrl: (record.pdfUrl || '').slice(0, 1000),
+            fileSizeBytes: Math.max(0, Number(record.fileSizeBytes) || 0),
+            downloadedAt: serverTimestamp(),
+          };
+          setDoc(doc(db, path, record.itemId), docPayload).catch((err) => {
+            handleListenerErrorSafe(err, OperationType.WRITE, `${path}/${record.itemId}`);
+          });
         } else if (appUser.authMode === 'number' && appUser.bearerToken) {
           fetch('/api/number-user/state', {
             method: 'POST',
@@ -321,8 +322,19 @@ function AppContent() {
       .catch(() => {});
   }, [appUser?.uid]);
 
-  // Listen to Firebase Auth state with resilient offline fallback
+  // Listen to Firebase Auth state & resolve any standalone redirect sign-in on mount
   useEffect(() => {
+    getRedirectResult(auth).catch((err: unknown) => {
+      const code = (err as { code?: string } | null)?.code || '';
+      if (code && code !== 'auth/no-current-user') {
+        setAuthError(
+          err instanceof Error
+            ? err.message
+            : 'Google দিয়ে লগইন সম্পন্ন করা যায়নি।'
+        );
+      }
+    });
+
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
       if (fbUser) {
@@ -375,7 +387,20 @@ function AppContent() {
               photoUrl: data.photoUrl || fbUser.photoURL || '',
               role: isAdmin ? 'admin' : data.role || 'student',
             };
-            setAppUser(resolvedUser);
+            setAppUser((curr) => {
+              if (
+                curr &&
+                curr.uid === resolvedUser.uid &&
+                curr.name === resolvedUser.name &&
+                curr.email === resolvedUser.email &&
+                curr.phone === resolvedUser.phone &&
+                curr.photoUrl === resolvedUser.photoUrl &&
+                curr.role === resolvedUser.role
+              ) {
+                return curr;
+              }
+              return resolvedUser;
+            });
             writeLocalCache(CACHE_USER_KEY, resolvedUser);
           } else if (navigator.onLine) {
             const pendingPrefill = readLocalCache<{
@@ -385,20 +410,21 @@ function AppContent() {
             } | null>('noor_elahi_pending_google_prefill', null);
 
             const initialName =
-              pendingPrefill?.name?.trim() || fbUser.displayName || 'শিক্ষার্থী';
-            const initialPhoto =
-              pendingPrefill?.photoUrl || fbUser.photoURL || '';
+              (pendingPrefill?.name?.trim() || fbUser.displayName || 'শিক্ষার্থী').slice(0, 100);
+            const rawPhoto = pendingPrefill?.photoUrl || fbUser.photoURL || '';
+            const safePhoto =
+              rawPhoto.length <= 65000 ? rawPhoto : '';
             const passwordHash = pendingPrefill?.password
               ? await sha256Hex(pendingPrefill.password)
               : '';
 
             const profilePayload = {
               uid: fbUser.uid,
-              name: initialName.slice(0, 100),
+              name: initialName || 'শিক্ষার্থী',
               email: (fbUser.email || '').slice(0, 160),
               phone: '',
-              photoUrl: initialPhoto.slice(0, 65000),
-              passwordHash,
+              photoUrl: safePhoto,
+              passwordHash: passwordHash.slice(0, 128),
               role: isAdmin ? 'admin' : 'student',
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
@@ -671,14 +697,59 @@ function AppContent() {
     setAuthError('');
     setAuthLoading(true);
     try {
-      writeLocalCache('noor_elahi_pending_google_prefill', prefill);
+      try {
+        localStorage.setItem('noor_elahi_pending_google_prefill', JSON.stringify(prefill));
+      } catch {
+        // Ignore storage error before popup
+      }
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
-      setAuthError(
-        err instanceof Error
-          ? err.message
-          : 'Google দিয়ে লগইন করা যায়নি। আবার চেষ্টা করুন।'
-      );
+      const code = (err as { code?: string } | null)?.code || '';
+      const isTopLevelWindow = (() => {
+        try {
+          return window.self === window.top;
+        } catch {
+          return false;
+        }
+      })();
+      const isStandalonePWA =
+        window.matchMedia('(display-mode: standalone)').matches ||
+        (window.navigator as unknown as { standalone?: boolean }).standalone === true;
+
+      if (
+        (code === 'auth/popup-blocked' ||
+          code === 'auth/operation-not-supported-in-this-environment' ||
+          code === 'auth/web-storage-unsupported') &&
+        (isStandalonePWA || isTopLevelWindow)
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirErr) {
+          const rCode = (redirErr as { code?: string } | null)?.code || '';
+          setAuthError(`Google লগইন করা যায়নি (${rCode || 'redirect_error'})।`);
+          return;
+        }
+      }
+
+      if (code === 'auth/cancelled-popup-request') {
+        return;
+      }
+      if (code === 'auth/popup-closed-by-user') {
+        setAuthError('Google সাইন-ইন পপআপটি বন্ধ হয়ে গেছে। আবার চেষ্টা করুন।');
+      } else if (code === 'auth/popup-blocked') {
+        setAuthError('ব্রাউজারে পপআপ ব্লক করা আছে। পপআপ অনুমতি দিয়ে আবার চেষ্টা করুন।');
+      } else if (code === 'auth/network-request-failed') {
+        setAuthError('ইন্টারনেট সংযোগে সমস্যা। নেটওয়ার্ক পরীক্ষা করে আবার চেষ্টা করুন।');
+      } else if (code === 'auth/unauthorized-domain') {
+        setAuthError(`এই ডোমেইনটি (${window.location.hostname}) অনুমোদিত নয়।`);
+      } else {
+        setAuthError(
+          err instanceof Error
+            ? `Google লগইন ব্যর্থ হয়েছে: ${err.message}`
+            : 'Google দিয়ে লগইন করা যায়নি। আবার চেষ্টা করুন।'
+        );
+      }
     } finally {
       setAuthLoading(false);
     }
@@ -802,9 +873,11 @@ function AppContent() {
   }) => {
     if (!appUser) return;
     if (appUser.authMode === 'google' && firebaseUser) {
+      const safeName = payload.name.trim().slice(0, 100) || appUser.name;
+      const safePhoto = payload.photoUrl.length <= 65000 ? payload.photoUrl : '';
       const updates: Record<string, unknown> = {
-        name: payload.name,
-        photoUrl: payload.photoUrl,
+        name: safeName,
+        photoUrl: safePhoto,
         updatedAt: serverTimestamp(),
       };
       if (payload.newPassword) {
@@ -877,8 +950,14 @@ function AppContent() {
     addedItems: Array<{ sectionTitle: string; itemName: string }>
   ) => {
     if (!firebaseUser) return;
-    const payload = {
+    const safeSubject: SubjectDoc = {
       ...subject,
+      name: (subject.name || '').slice(0, 120),
+      description: (subject.description || '').slice(0, 2000),
+      sections: (subject.sections || []).slice(0, 40),
+    };
+    const payload = {
+      ...safeSubject,
       updatedBy: firebaseUser.uid,
       updatedAt: serverTimestamp(),
     };
@@ -995,25 +1074,26 @@ function AppContent() {
     });
 
     if (appUser?.authMode === 'google' && firebaseUser) {
-      for (const r of records) {
-        const path = `users/${firebaseUser.uid}/downloads/${r.itemId}`;
-        try {
-          await setDoc(doc(db, 'users', firebaseUser.uid, 'downloads', r.itemId), {
-            uid: firebaseUser.uid,
-            itemId: r.itemId,
-            subjectId: r.subjectId,
-            sectionId: r.sectionId,
-            sectionTitle: (r.sectionTitle || 'ক্লাস').slice(0, 160),
-            classNumber: Math.max(1, Number(r.classNumber) || 1),
-            videoName: (r.videoName || 'ক্লাস').slice(0, 200),
-            videoUrl: (r.videoUrl || '').slice(0, 1000),
-            pdfUrl: (r.pdfUrl || '').slice(0, 1000),
-            fileSizeBytes: Math.max(0, Number(r.fileSizeBytes) || 0),
-            downloadedAt: serverTimestamp(),
-          });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, path);
-        }
+      const writes = records.map((r) => {
+        const path = `users/${firebaseUser.uid}/downloads`;
+        return setDoc(doc(db, path, r.itemId), {
+          uid: firebaseUser.uid,
+          itemId: r.itemId,
+          subjectId: r.subjectId,
+          sectionId: r.sectionId,
+          sectionTitle: (r.sectionTitle || 'ক্লাস').slice(0, 160),
+          classNumber: Math.max(1, Number(r.classNumber) || 1),
+          videoName: (r.videoName || 'ক্লাস').slice(0, 200),
+          videoUrl: (r.videoUrl || '').slice(0, 1000),
+          pdfUrl: (r.pdfUrl || '').slice(0, 1000),
+          fileSizeBytes: Math.max(0, Number(r.fileSizeBytes) || 0),
+          downloadedAt: serverTimestamp(),
+        }).catch((err) => {
+          handleListenerErrorSafe(err, OperationType.WRITE, `${path}/${r.itemId}`);
+        });
+      });
+      if (navigator.onLine) {
+        await Promise.all(writes);
       }
     } else if (appUser?.authMode === 'number' && appUser.bearerToken) {
       for (const r of records) {
@@ -1200,6 +1280,8 @@ function AppContent() {
                   subjects={subjects}
                   downloads={downloadsMap}
                   downloadTasks={downloadTasks}
+                  isOnline={isOnline}
+                  onOfflineAlert={() => setOfflineModalOpen(true)}
                   onPlayDownloaded={(rec) => {
                     const secTitle =
                       rec.sectionTitle ||

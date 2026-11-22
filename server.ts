@@ -9,7 +9,6 @@ import dns from 'dns/promises';
 const PORT = 3000;
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const STORE_PATH = path.join(DATA_DIR, 'noor_elahi_store.json');
-const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
 interface StoredNumberUser {
   uid: string;
@@ -36,6 +35,7 @@ interface StoredInboxItem {
 }
 
 interface StoreData {
+  sessionSecret?: string;
   numberUsers: Record<string, StoredNumberUser>;
   subjects: Record<string, unknown>;
   notifications: Array<Record<string, unknown>>;
@@ -50,6 +50,7 @@ function ensureStore(): StoreData {
   }
   if (!fs.existsSync(STORE_PATH)) {
     const initial: StoreData = {
+      sessionSecret: crypto.randomBytes(32).toString('hex'),
       numberUsers: {},
       subjects: {},
       notifications: [],
@@ -62,9 +63,15 @@ function ensureStore(): StoreData {
   }
   try {
     const raw = fs.readFileSync(STORE_PATH, 'utf-8');
-    return JSON.parse(raw) as StoreData;
+    const parsed = JSON.parse(raw) as StoreData;
+    if (!parsed.sessionSecret) {
+      parsed.sessionSecret = crypto.randomBytes(32).toString('hex');
+      fs.writeFileSync(STORE_PATH, JSON.stringify(parsed, null, 2));
+    }
+    return parsed;
   } catch {
-    return {
+    const fallback: StoreData = {
+      sessionSecret: crypto.randomBytes(32).toString('hex'),
       numberUsers: {},
       subjects: {},
       notifications: [],
@@ -72,12 +79,24 @@ function ensureStore(): StoreData {
       progress: {},
       downloads: {},
     };
+    return fallback;
   }
 }
+
+function getSessionSecret(): string {
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  const store = ensureStore();
+  return store.sessionSecret || 'noor_elahi_fallback_secret';
+}
+
+const SESSION_SECRET = getSessionSecret();
 
 function saveStore(data: StoreData) {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  if (!data.sessionSecret) {
+    data.sessionSecret = SESSION_SECRET;
   }
   fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2));
 }
@@ -410,7 +429,21 @@ async function startServer() {
         const { done, value } = await reader.read();
         if (done || closed) break;
         if (value && !res.writableEnded) {
-          res.write(Buffer.from(value));
+          const canContinue = res.write(Buffer.from(value));
+          if (!canContinue && !closed) {
+            await new Promise<void>((resolve) => {
+              const onDrain = () => {
+                res.off('close', onClose);
+                resolve();
+              };
+              const onClose = () => {
+                res.off('drain', onDrain);
+                resolve();
+              };
+              res.once('drain', onDrain);
+              res.once('close', onClose);
+            });
+          }
         }
       }
       if (!res.writableEnded) {
