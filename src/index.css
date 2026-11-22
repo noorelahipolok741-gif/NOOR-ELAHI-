@@ -3,16 +3,34 @@
 
 @layer base {
   html,
-  body {
+  body,
+  #root {
     background-color: #020617;
     color: #f1f5f9;
     font-family: "Hind Siliguri", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
     overscroll-behavior: none;
-    overscroll-behavior-y: contain;
+    overscroll-behavior-y: none;
+    overscroll-behavior-x: none;
     touch-action: pan-x pan-y;
     -webkit-tap-highlight-color: transparent;
     -webkit-text-size-adjust: 100%;
-    overflow-x: hidden;
+    text-size-adjust: 100%;
+  }
+
+  *,
+  *::before,
+  *::after {
+    touch-action: pan-x pan-y;
+    overscroll-behavior-y: none;
+  }
+
+  input[type="range"] {
+    touch-action: pan-x;
   }
 
   button,

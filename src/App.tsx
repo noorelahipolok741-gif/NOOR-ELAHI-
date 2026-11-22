@@ -10,6 +10,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromCache,
   onSnapshot,
   orderBy,
   query,
@@ -52,6 +53,9 @@ import { downloadManager } from './lib/downloadManager';
 import {
   deleteOfflineMedia,
   listOfflineMedia,
+  loadAppStateBackup,
+  removeAppStateBackup,
+  saveAppStateBackup,
 } from './lib/offlineStorage';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -67,6 +71,8 @@ import { PWAInstallButton } from './components/PWAInstallButton';
 
 type ActiveTab = 'subjects' | 'downloads' | 'profile';
 
+const CACHE_USER_KEY = 'noor_elahi_cache_user_v1';
+const EXPLICIT_LOGOUT_KEY = 'noor_elahi_explicit_logout_v1';
 const CACHE_SUBJECTS_KEY = 'noor_elahi_cache_subjects_v1';
 const CACHE_NOTIFS_KEY = 'noor_elahi_cache_notifs_v1';
 const CACHE_PROGRESS_KEY = 'noor_elahi_cache_progress_v1';
@@ -87,13 +93,39 @@ function writeLocalCache(key: string, value: unknown) {
   } catch {
     // Ignore quota errors
   }
+  saveAppStateBackup(key, value).catch(() => {});
+}
+
+function clearCachedUser() {
+  try {
+    localStorage.removeItem(CACHE_USER_KEY);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+  } catch {
+    // Ignore storage error
+  }
+  removeAppStateBackup(CACHE_USER_KEY).catch(() => {});
+}
+
+function handleListenerErrorSafe(
+  err: unknown,
+  op: OperationType,
+  path: string
+) {
+  const code = (err as { code?: string } | null)?.code || '';
+  if (typeof navigator !== 'undefined' && navigator.onLine && code === 'permission-denied') {
+    handleFirestoreError(err, op, path);
+  }
 }
 
 function AppContent() {
   const isOnline = useOnlineStatus();
-  const [authReady, setAuthReady] = useState(false);
+  const initialCachedUser = useMemo(
+    () => readLocalCache<AppUser | null>(CACHE_USER_KEY, null),
+    []
+  );
+  const [authReady, setAuthReady] = useState<boolean>(() => Boolean(initialCachedUser));
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
-  const [appUser, setAppUser] = useState<AppUser | null>(null);
+  const [appUser, setAppUser] = useState<AppUser | null>(initialCachedUser);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
 
@@ -153,9 +185,58 @@ function AppContent() {
     }, 4000);
   }, []);
 
-  // Test Firestore connection once on mount
+  // Restore IndexedDB backup caches if localStorage was cleared + safety authReady timer
   useEffect(() => {
+    let active = true;
     testConnection();
+
+    const safetyTimer = window.setTimeout(() => {
+      if (active) setAuthReady(true);
+    }, 1600);
+
+    (async () => {
+      let explicitLogout = false;
+      try {
+        explicitLogout = localStorage.getItem(EXPLICIT_LOGOUT_KEY) === '1';
+      } catch {
+        explicitLogout = false;
+      }
+
+      if (!explicitLogout) {
+        const backedUpUser = await loadAppStateBackup<AppUser>(CACHE_USER_KEY);
+        if (active && backedUpUser) {
+          setAppUser((curr) => curr || backedUpUser);
+          writeLocalCache(CACHE_USER_KEY, backedUpUser);
+          downloadManager.setUid(backedUpUser.uid);
+          setAuthReady(true);
+        }
+      }
+
+      const backedUpSubjects = await loadAppStateBackup<Record<string, SubjectDoc>>(CACHE_SUBJECTS_KEY);
+      if (active && backedUpSubjects && Object.keys(backedUpSubjects).length > 0) {
+        setSubjects((curr) => (Object.keys(curr).length > 0 ? curr : backedUpSubjects));
+      }
+
+      const backedUpNotifs = await loadAppStateBackup<AppNotification[]>(CACHE_NOTIFS_KEY);
+      if (active && backedUpNotifs && backedUpNotifs.length > 0) {
+        setNotifications((curr) => (curr.length > 0 ? curr : backedUpNotifs));
+      }
+
+      const backedUpProgress = await loadAppStateBackup<Record<string, WatchProgress>>(CACHE_PROGRESS_KEY);
+      if (active && backedUpProgress && Object.keys(backedUpProgress).length > 0) {
+        setProgressMap((curr) => (Object.keys(curr).length > 0 ? curr : backedUpProgress));
+      }
+
+      const backedUpDownloads = await loadAppStateBackup<Record<string, DownloadRecord>>(CACHE_DOWNLOADS_KEY);
+      if (active && backedUpDownloads && Object.keys(backedUpDownloads).length > 0) {
+        setDownloadsMap((curr) => ({ ...backedUpDownloads, ...curr }));
+      }
+    })();
+
+    return () => {
+      active = false;
+      clearTimeout(safetyTimer);
+    };
   }, []);
 
   // Subscribe to downloadManager progress & completion
@@ -240,18 +321,43 @@ function AppContent() {
       .catch(() => {});
   }, [appUser?.uid]);
 
-  // Listen to Firebase Auth state
+  // Listen to Firebase Auth state with resilient offline fallback
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
       if (fbUser) {
-        downloadManager.setUid(fbUser.uid);
-        const isAdmin =
-          isAdminEmail(fbUser.email) && fbUser.emailVerified;
-
-        const userDocPath = `users/${fbUser.uid}`;
         try {
-          const snap = await getDoc(doc(db, 'users', fbUser.uid));
+          localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
+        } catch {
+          // Ignore
+        }
+        downloadManager.setUid(fbUser.uid);
+        const isAdmin = isAdminEmail(fbUser.email) && fbUser.emailVerified;
+        const cached = readLocalCache<AppUser | null>(CACHE_USER_KEY, null);
+        const sameCached = cached?.uid === fbUser.uid ? cached : null;
+
+        const fallbackUser: AppUser = {
+          uid: fbUser.uid,
+          authMode: 'google',
+          name: sameCached?.name || fbUser.displayName || 'শিক্ষার্থী',
+          email: sameCached?.email || fbUser.email || '',
+          phone: sameCached?.phone || '',
+          photoUrl: sameCached?.photoUrl || fbUser.photoURL || '',
+          role: isAdmin ? 'admin' : sameCached?.role || 'student',
+        };
+
+        setAppUser((curr) => curr || fallbackUser);
+        setAuthReady(true);
+
+        const userDocRef = doc(db, 'users', fbUser.uid);
+        try {
+          const snap = await Promise.race([
+            getDoc(userDocRef),
+            new Promise<never>((_resolve, reject) =>
+              window.setTimeout(() => reject(new Error('offline_timeout')), navigator.onLine ? 6000 : 1200)
+            ),
+          ]);
+
           if (snap.exists()) {
             const data = snap.data() as {
               name?: string;
@@ -260,7 +366,7 @@ function AppContent() {
               photoUrl?: string;
               role?: 'admin' | 'student';
             };
-            setAppUser({
+            const resolvedUser: AppUser = {
               uid: fbUser.uid,
               authMode: 'google',
               name: data.name || fbUser.displayName || 'শিক্ষার্থী',
@@ -268,8 +374,10 @@ function AppContent() {
               phone: data.phone || '',
               photoUrl: data.photoUrl || fbUser.photoURL || '',
               role: isAdmin ? 'admin' : data.role || 'student',
-            });
-          } else {
+            };
+            setAppUser(resolvedUser);
+            writeLocalCache(CACHE_USER_KEY, resolvedUser);
+          } else if (navigator.onLine) {
             const pendingPrefill = readLocalCache<{
               name?: string;
               password?: string;
@@ -295,9 +403,9 @@ function AppContent() {
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             };
-            await setDoc(doc(db, 'users', fbUser.uid), profilePayload);
+            await setDoc(userDocRef, profilePayload);
             localStorage.removeItem('noor_elahi_pending_google_prefill');
-            setAppUser({
+            const createdUser: AppUser = {
               uid: fbUser.uid,
               authMode: 'google',
               name: profilePayload.name,
@@ -305,26 +413,58 @@ function AppContent() {
               phone: '',
               photoUrl: profilePayload.photoUrl,
               role: isAdmin ? 'admin' : 'student',
-            });
-          }
-        } catch (err) {
-          // If offline, fall back gracefully from cached profile
-          if (!navigator.onLine) {
-            setAppUser({
-              uid: fbUser.uid,
-              authMode: 'google',
-              name: fbUser.displayName || 'শিক্ষার্থী',
-              email: fbUser.email || '',
-              phone: '',
-              photoUrl: fbUser.photoURL || '',
-              role: isAdmin ? 'admin' : 'student',
-            });
+            };
+            setAppUser(createdUser);
+            writeLocalCache(CACHE_USER_KEY, createdUser);
           } else {
-            handleFirestoreError(err, OperationType.GET, userDocPath);
+            writeLocalCache(CACHE_USER_KEY, fallbackUser);
+          }
+        } catch {
+          try {
+            const cachedSnap = await getDocFromCache(userDocRef);
+            if (cachedSnap.exists()) {
+              const data = cachedSnap.data() as {
+                name?: string;
+                email?: string;
+                phone?: string;
+                photoUrl?: string;
+                role?: 'admin' | 'student';
+              };
+              const offlineUser: AppUser = {
+                uid: fbUser.uid,
+                authMode: 'google',
+                name: data.name || fallbackUser.name,
+                email: data.email || fallbackUser.email,
+                phone: data.phone || fallbackUser.phone,
+                photoUrl: data.photoUrl || fallbackUser.photoUrl,
+                role: isAdmin ? 'admin' : data.role || fallbackUser.role,
+              };
+              setAppUser(offlineUser);
+              writeLocalCache(CACHE_USER_KEY, offlineUser);
+            } else {
+              setAppUser(fallbackUser);
+              writeLocalCache(CACHE_USER_KEY, fallbackUser);
+            }
+          } catch {
+            setAppUser(fallbackUser);
+            writeLocalCache(CACHE_USER_KEY, fallbackUser);
           }
         }
       } else {
-        setAppUser((curr) => (curr?.authMode === 'number' ? curr : null));
+        let explicitLogout = false;
+        try {
+          explicitLogout = localStorage.getItem(EXPLICIT_LOGOUT_KEY) === '1';
+        } catch {
+          explicitLogout = false;
+        }
+        setAppUser((curr) => {
+          if (curr?.authMode === 'number') return curr;
+          if (!navigator.onLine && !explicitLogout && curr) return curr;
+          if (!navigator.onLine && !explicitLogout) {
+            return readLocalCache<AppUser | null>(CACHE_USER_KEY, null);
+          }
+          return null;
+        });
       }
       setAuthReady(true);
     });
@@ -392,7 +532,7 @@ function AppContent() {
           setSubjects(map);
           writeLocalCache(CACHE_SUBJECTS_KEY, map);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'subjects')
+        (err) => handleListenerErrorSafe(err, OperationType.LIST, 'subjects')
       )
     );
 
@@ -420,7 +560,7 @@ function AppContent() {
           });
           writeLocalCache(CACHE_NOTIFS_KEY, list);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, 'notifications')
+        (err) => handleListenerErrorSafe(err, OperationType.LIST, 'notifications')
       )
     );
 
@@ -437,7 +577,7 @@ function AppContent() {
           setProgressMap(map);
           writeLocalCache(CACHE_PROGRESS_KEY, map);
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, progPath)
+        (err) => handleListenerErrorSafe(err, OperationType.LIST, progPath)
       )
     );
 
@@ -461,7 +601,7 @@ function AppContent() {
             return next;
           });
         },
-        (err) => handleFirestoreError(err, OperationType.LIST, dlPath)
+        (err) => handleListenerErrorSafe(err, OperationType.LIST, dlPath)
       )
     );
 
@@ -478,7 +618,7 @@ function AppContent() {
               setVaultHash(null);
             }
           },
-          (err) => handleFirestoreError(err, OperationType.GET, 'adminConfig/vault')
+          (err) => handleListenerErrorSafe(err, OperationType.GET, 'adminConfig/vault')
         )
       );
 
@@ -492,7 +632,7 @@ function AppContent() {
             );
             setFirestoreInbox(list);
           },
-          (err) => handleFirestoreError(err, OperationType.LIST, 'adminInbox')
+          (err) => handleListenerErrorSafe(err, OperationType.LIST, 'adminInbox')
         )
       );
 
@@ -575,7 +715,12 @@ function AppContent() {
         return;
       }
       downloadManager.setUid(data.user.uid);
-      setAppUser({
+      try {
+        localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
+      } catch {
+        // Ignore
+      }
+      const nextNumUser: AppUser = {
         uid: data.user.uid,
         authMode: 'number',
         name: data.user.name,
@@ -584,7 +729,9 @@ function AppContent() {
         photoUrl: data.user.photoUrl,
         role: 'student',
         bearerToken: data.token,
-      });
+      };
+      setAppUser(nextNumUser);
+      writeLocalCache(CACHE_USER_KEY, nextNumUser);
     } catch {
       setAuthError('নেটওয়ার্ক সমস্যা। ইন্টারনেট সংযোগ পরীক্ষা করুন।');
     } finally {
@@ -593,6 +740,7 @@ function AppContent() {
   };
 
   const handleLogout = async () => {
+    clearCachedUser();
     try {
       if (firebaseUser) {
         await signOut(auth);
@@ -686,9 +834,11 @@ function AppContent() {
           handleFirestoreError(err, OperationType.CREATE, `adminInbox/${msgId}`);
         }
       }
-      setAppUser((prev) =>
-        prev ? { ...prev, name: payload.name, photoUrl: payload.photoUrl } : prev
-      );
+      setAppUser((prev) => {
+        const next = prev ? { ...prev, name: payload.name, photoUrl: payload.photoUrl } : prev;
+        if (next) writeLocalCache(CACHE_USER_KEY, next);
+        return next;
+      });
     } else if (appUser.authMode === 'number' && appUser.bearerToken) {
       const res = await fetch('/api/number-auth/update', {
         method: 'POST',
@@ -700,9 +850,11 @@ function AppContent() {
       });
       if (!res.ok) throw new Error('Update failed');
       const data = (await res.json()) as { user: { name: string; photoUrl: string } };
-      setAppUser((prev) =>
-        prev ? { ...prev, name: data.user.name, photoUrl: data.user.photoUrl } : prev
-      );
+      setAppUser((prev) => {
+        const next = prev ? { ...prev, name: data.user.name, photoUrl: data.user.photoUrl } : prev;
+        if (next) writeLocalCache(CACHE_USER_KEY, next);
+        return next;
+      });
     }
   };
 
@@ -925,7 +1077,7 @@ function AppContent() {
 
   if (!authReady) {
     return (
-      <div className="min-h-screen bg-[#020617] flex items-center justify-center">
+      <div className="h-[100dvh] w-full bg-[#020617] flex items-center justify-center">
         <div className="w-10 h-10 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
       </div>
     );
@@ -941,7 +1093,7 @@ function AppContent() {
           authError={authError}
         />
       ) : (
-        <div className="min-h-screen bg-[#020617] text-slate-100 flex flex-col">
+        <div className="h-[100dvh] w-full bg-[#020617] text-slate-100 flex flex-col overflow-hidden overscroll-none">
           {/* Top Notification Toast */}
           {topBanner && (
             <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] max-w-sm w-[92%] rounded-2xl bg-emerald-500 text-slate-950 px-4 py-3 shadow-2xl flex items-center gap-2.5 text-sm font-bold">
@@ -951,7 +1103,7 @@ function AppContent() {
           )}
 
           {/* Top App Bar matching Uploaded Reference Image 2 & 3 */}
-          <header className="sticky top-0 z-30 h-16 px-4 bg-[#060a17]/95 backdrop-blur-md border-b border-slate-800/80 flex items-center justify-between gap-3">
+          <header className="shrink-0 z-30 h-16 px-4 bg-[#060a17]/95 backdrop-blur-md border-b border-slate-800/80 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 min-w-0">
               <img
                 src="/icon-192.png"
@@ -1021,74 +1173,76 @@ function AppContent() {
             </div>
           </header>
 
-          {/* Main Scrollable Viewport */}
-          <main className="flex-1 w-full max-w-6xl mx-auto px-4 pt-5 pb-24">
-            {activeTab === 'subjects' && (
-              <SubjectsView
-                subjects={subjects}
-                downloads={downloadsMap}
-                downloadTasks={downloadTasks}
-                isOnline={isOnline}
-                onPlayVideo={(payload) => setActiveVideo(payload)}
-                onOpenPdf={({ item }) =>
-                  setActivePdf({
-                    itemId: item.id,
-                    title: item.name,
-                    pdfUrl: item.pdfUrl,
-                  })
-                }
-                onOfflineAlert={() => setOfflineModalOpen(true)}
-              />
-            )}
+          {/* Main Scrollable Viewport (isolated inside 100dvh shell so pull-to-refresh never triggers) */}
+          <main className="flex-1 w-full overflow-y-auto overflow-x-hidden overscroll-none">
+            <div className="w-full max-w-6xl mx-auto px-4 pt-5 pb-24">
+              {activeTab === 'subjects' && (
+                <SubjectsView
+                  subjects={subjects}
+                  downloads={downloadsMap}
+                  downloadTasks={downloadTasks}
+                  isOnline={isOnline}
+                  onPlayVideo={(payload) => setActiveVideo(payload)}
+                  onOpenPdf={({ item }) =>
+                    setActivePdf({
+                      itemId: item.id,
+                      title: item.name,
+                      pdfUrl: item.pdfUrl,
+                    })
+                  }
+                  onOfflineAlert={() => setOfflineModalOpen(true)}
+                />
+              )}
 
-            {activeTab === 'downloads' && (
-              <DownloadsView
-                uid={appUser.uid}
-                subjects={subjects}
-                downloads={downloadsMap}
-                downloadTasks={downloadTasks}
-                onPlayDownloaded={(rec) => {
-                  const secTitle =
-                    rec.sectionTitle ||
-                    SUBJECT_LIST.find((s) => s.id === rec.subjectId)?.name ||
-                    'ক্লাস';
-                  setActiveVideo({
-                    item: {
-                      id: rec.itemId,
-                      name: rec.videoName,
-                      videoUrl: rec.videoUrl,
+              {activeTab === 'downloads' && (
+                <DownloadsView
+                  uid={appUser.uid}
+                  subjects={subjects}
+                  downloads={downloadsMap}
+                  downloadTasks={downloadTasks}
+                  onPlayDownloaded={(rec) => {
+                    const secTitle =
+                      rec.sectionTitle ||
+                      SUBJECT_LIST.find((s) => s.id === rec.subjectId)?.name ||
+                      'ক্লাস';
+                    setActiveVideo({
+                      item: {
+                        id: rec.itemId,
+                        name: rec.videoName,
+                        videoUrl: rec.videoUrl,
+                        pdfUrl: rec.pdfUrl,
+                        createdAt: Date.now(),
+                      },
+                      subjectId: rec.subjectId,
+                      sectionId: rec.sectionId,
+                      sectionTitle: secTitle,
+                      classNumber: rec.classNumber,
+                    });
+                  }}
+                  onOpenDownloadedPdf={(rec) =>
+                    setActivePdf({
+                      itemId: rec.itemId,
+                      title: rec.videoName,
                       pdfUrl: rec.pdfUrl,
-                      createdAt: Date.now(),
-                    },
-                    subjectId: rec.subjectId,
-                    sectionId: rec.sectionId,
-                    sectionTitle: secTitle,
-                    classNumber: rec.classNumber,
-                  });
-                }}
-                onOpenDownloadedPdf={(rec) =>
-                  setActivePdf({
-                    itemId: rec.itemId,
-                    title: rec.videoName,
-                    pdfUrl: rec.pdfUrl,
-                  })
-                }
-                onDeleteDownload={handleDeleteDownload}
-                onRestoreMatchedRecords={handleRestoreMatchedRecords}
-              />
-            )}
+                    })
+                  }
+                  onDeleteDownload={handleDeleteDownload}
+                  onRestoreMatchedRecords={handleRestoreMatchedRecords}
+                />
+              )}
 
-            {activeTab === 'profile' && (
-              <ProfileView
-                user={appUser}
-                inboxCount={combinedInbox.length}
-                onUpdateProfile={handleUpdateProfile}
-                onOpenFileVault={() => setVaultOpen(true)}
-                onOpenAdminInbox={() => setInboxOpen(true)}
-                onOpenReportModal={() => setReportModalOpen(true)}
-                onLogout={handleLogout}
-              />
-            )}
+              {activeTab === 'profile' && (
+                <ProfileView
+                  user={appUser}
+                  inboxCount={combinedInbox.length}
+                  onUpdateProfile={handleUpdateProfile}
+                  onOpenFileVault={() => setVaultOpen(true)}
+                  onOpenAdminInbox={() => setInboxOpen(true)}
+                  onOpenReportModal={() => setReportModalOpen(true)}
+                  onLogout={handleLogout}
+                />
+              )}
+            </div>
           </main>
 
           {/* Fixed Bottom Navigation Bar matching Image 2 & 3 (3 Tabs Only: বিষয়সমূহ, ডাউনলোড, প্রোফাইল) */}

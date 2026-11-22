@@ -77,6 +77,48 @@ async function loadDirHandleFromDB(): Promise<FileSystemDirectoryHandle | null> 
   }
 }
 
+export async function saveAppStateBackup(key: string, value: unknown): Promise<void> {
+  try {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SETTINGS_STORE, 'readwrite');
+      tx.objectStore(SETTINGS_STORE).put(value, `cache_${key}`);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // Ignore IndexedDB backup error
+  }
+}
+
+export async function loadAppStateBackup<T>(key: string): Promise<T | null> {
+  try {
+    const db = await openDB();
+    return await new Promise<T | null>((resolve) => {
+      const tx = db.transaction(SETTINGS_STORE, 'readonly');
+      const req = tx.objectStore(SETTINGS_STORE).get(`cache_${key}`);
+      req.onsuccess = () => resolve((req.result as T) ?? null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function removeAppStateBackup(key: string): Promise<void> {
+  try {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SETTINGS_STORE, 'readwrite');
+      tx.objectStore(SETTINGS_STORE).delete(`cache_${key}`);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // Ignore delete failure
+  }
+}
+
 export async function saveOfflineMedia(entry: OfflineMediaEntry): Promise<void> {
   const db = await openDB();
   return new Promise((resolve, reject) => {

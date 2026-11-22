@@ -370,7 +370,7 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#020617] flex flex-col overflow-y-auto">
+    <div className="fixed inset-0 z-50 bg-[#020617] flex flex-col overflow-y-auto overflow-x-hidden overscroll-none">
       {/* Top Bar */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-800/80 bg-slate-950/90 shrink-0">
         <button

@@ -69,8 +69,8 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-[#020617]/95 backdrop-blur-md">
-      <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-slate-800 bg-slate-950/90">
+    <div className="fixed inset-0 z-50 flex flex-col bg-[#020617]/95 backdrop-blur-md overscroll-none">
+      <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-slate-800 bg-slate-950/90 shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
           <FileText className="w-5 h-5 text-emerald-400 shrink-0" />
           <h3 className="text-sm font-semibold text-white truncate">{title} — PDF</h3>
@@ -95,7 +95,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
         </div>
       </div>
 
-      <div className="flex-1 relative overflow-y-auto bg-slate-900">
+      <div className="flex-1 relative overflow-y-auto overscroll-none bg-slate-900">
         {loading ? (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="w-9 h-9 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />

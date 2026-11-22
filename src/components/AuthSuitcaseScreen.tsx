@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Camera, Chrome, Lock, Phone, User } from 'lucide-react';
+import { Camera, Chrome, Lock, Phone, User, WifiOff } from 'lucide-react';
+import { useOnlineStatus } from '../hooks/useOnlineStatus';
 
 interface AuthSuitcaseScreenProps {
   onGoogleLogin: (prefill: { name: string; password: string; photoUrl: string }) => Promise<void>;
@@ -59,7 +60,8 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
   authLoading,
   authError,
 }) => {
-  const [suitcaseOpen, setSuitcaseOpen] = useState(false);
+  const isOnline = useOnlineStatus();
+  const [suitcaseOpen, setSuitcaseOpen] = useState(true);
   const [showNumberForm, setShowNumberForm] = useState(false);
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
@@ -105,10 +107,16 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-100 flex flex-col items-center justify-center p-4 sm:p-6 relative overflow-hidden">
+    <div className="h-[100dvh] w-full bg-[#020617] text-slate-100 overflow-y-auto overflow-x-hidden overscroll-none flex flex-col items-center justify-center p-4 sm:p-6 relative">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,_rgba(16,185,129,0.14),_transparent_55%),radial-gradient(ellipse_at_bottom,_rgba(6,182,212,0.10),_transparent_55%)]" />
 
-      <div className="relative z-10 w-full max-w-md space-y-5">
+      <div className="relative z-10 w-full max-w-md space-y-5 my-auto">
+        {!isOnline && (
+          <div className="rounded-2xl bg-amber-500/15 border border-amber-500/35 px-3.5 py-2.5 flex items-center justify-center gap-2 text-xs font-medium text-amber-200">
+            <WifiOff className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>আপনি অফলাইনে আছেন · প্রথমবার লগইন করতে ইন্টারনেট সংযোগ চালু করুন</span>
+          </div>
+        )}
         {/* Brand Header with Uploaded NOOR ELAHI Logo */}
         <div className="text-center space-y-1.5">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-white border border-emerald-500/30 shadow-xl shadow-emerald-500/10 overflow-hidden mb-1">
@@ -211,13 +219,13 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
 
         {/* Main Auth Card Emerging from Suitcase Light */}
         <motion.div
-          initial={{ opacity: 0, y: 28, scale: 0.94 }}
+          initial={false}
           animate={
             suitcaseOpen
               ? { opacity: 1, y: 0, scale: 1 }
-              : { opacity: 0.2, y: 20, scale: 0.96 }
+              : { opacity: 0.75, y: 8, scale: 0.98 }
           }
-          transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+          transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
           className="rounded-3xl bg-slate-900/90 backdrop-blur-xl border border-slate-800 p-5 sm:p-6 shadow-2xl space-y-5"
         >
           {/* Profile Photo & Name Setup Row */}
