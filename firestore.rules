@@ -1,0 +1,227 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email in [
+          'noorelahipolok741@gmail.com',
+          'ashahinoor87@gmail.com',
+          'elahipoloknoor@gmail.com',
+          'polokmd741@gmail.com',
+          'nurailahi321@gmail.com',
+          'sabuzsikder68@gmail.com',
+          'sahinura383@gmail.com'
+        ] ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // --- Validation Blueprints ---
+    function isValidSubject(data) {
+      return data.keys().hasAll(['id', 'name', 'description', 'isPublished', 'sections', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'name', 'description', 'isPublished', 'sections', 'updatedBy', 'updatedAt'])
+        && isValidId(data.id)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && data.description is string && data.description.size() <= 2000
+        && data.isPublished is bool
+        && data.sections is list && data.sections.size() <= 40
+        && (data.sections.size() == 0 || data.sections[0] is map)
+        && isValidId(data.updatedBy) && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'name', 'email', 'phone', 'photoUrl', 'passwordHash', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'name', 'email', 'phone', 'photoUrl', 'passwordHash', 'role', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid) && data.uid == userId && data.uid == request.auth.uid
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && data.email is string && data.email.size() <= 160
+        && data.phone is string && data.phone.size() <= 30
+        && data.photoUrl is string && data.photoUrl.size() <= 65000
+        && data.passwordHash is string && data.passwordHash.size() <= 128
+        && data.role in ['student', 'admin']
+        && data.createdAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidWatchProgress(data, userId, itemId) {
+      return data.keys().hasAll(['uid', 'itemId', 'subjectId', 'sectionId', 'currentTime', 'duration', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'itemId', 'subjectId', 'sectionId', 'currentTime', 'duration', 'updatedAt'])
+        && isValidId(data.uid) && data.uid == userId && data.uid == request.auth.uid
+        && isValidId(data.itemId) && data.itemId == itemId
+        && isValidId(data.subjectId) && data.subjectId.size() <= 32
+        && isValidId(data.sectionId)
+        && data.currentTime is number && data.currentTime >= 0
+        && data.duration is number && data.duration >= 0
+        && data.updatedAt == request.time;
+    }
+
+    function isValidDownloadRecord(data, userId, itemId) {
+      return data.keys().hasAll(['uid', 'itemId', 'subjectId', 'sectionId', 'sectionTitle', 'classNumber', 'videoName', 'videoUrl', 'pdfUrl', 'fileSizeBytes', 'downloadedAt'])
+        && data.keys().hasOnly(['uid', 'itemId', 'subjectId', 'sectionId', 'sectionTitle', 'classNumber', 'videoName', 'videoUrl', 'pdfUrl', 'fileSizeBytes', 'downloadedAt'])
+        && isValidId(data.uid) && data.uid == userId && data.uid == request.auth.uid
+        && isValidId(data.itemId) && data.itemId == itemId
+        && isValidId(data.subjectId) && data.subjectId.size() <= 32
+        && isValidId(data.sectionId)
+        && data.sectionTitle is string && data.sectionTitle.size() >= 1 && data.sectionTitle.size() <= 160
+        && data.classNumber is number && data.classNumber >= 1
+        && data.videoName is string && data.videoName.size() >= 1 && data.videoName.size() <= 200
+        && data.videoUrl is string && data.videoUrl.size() <= 1000
+        && data.pdfUrl is string && data.pdfUrl.size() <= 1000
+        && data.fileSizeBytes is number && data.fileSizeBytes >= 0
+        && data.downloadedAt == request.time;
+    }
+
+    function isValidNotification(data, notifId) {
+      return data.keys().hasAll(['id', 'subjectId', 'subjectName', 'sectionTitle', 'itemName', 'message', 'isActive', 'createdBy', 'createdAt'])
+        && data.keys().hasOnly(['id', 'subjectId', 'subjectName', 'sectionTitle', 'itemName', 'message', 'isActive', 'createdBy', 'createdAt'])
+        && isValidId(data.id) && data.id == notifId
+        && isValidId(data.subjectId) && data.subjectId.size() <= 32
+        && data.subjectName is string && data.subjectName.size() >= 1 && data.subjectName.size() <= 120
+        && data.sectionTitle is string && data.sectionTitle.size() >= 1 && data.sectionTitle.size() <= 160
+        && data.itemName is string && data.itemName.size() >= 1 && data.itemName.size() <= 200
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 500
+        && data.isActive is bool
+        && isValidId(data.createdBy) && data.createdBy == request.auth.uid
+        && data.createdAt == request.time;
+    }
+
+    function isValidInboxMessage(data, messageId) {
+      return data.keys().hasAll(['id', 'uid', 'type', 'senderName', 'senderEmail', 'senderPhone', 'newPassword', 'message', 'createdAt'])
+        && data.keys().hasOnly(['id', 'uid', 'type', 'senderName', 'senderEmail', 'senderPhone', 'newPassword', 'message', 'createdAt'])
+        && isValidId(data.id) && data.id == messageId
+        && isValidId(data.uid) && data.uid == request.auth.uid
+        && data.type in ['password_change', 'issue_report']
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 100
+        && data.senderEmail is string && data.senderEmail.size() <= 160
+        && data.senderPhone is string && data.senderPhone.size() <= 30
+        && data.newPassword is string && data.newPassword.size() <= 128
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 2000
+        && data.createdAt == request.time;
+    }
+
+    function isValidAdminConfig(data) {
+      return data.keys().hasAll(['vaultPasswordHash', 'updatedBy', 'updatedAt'])
+        && data.keys().hasOnly(['vaultPasswordHash', 'updatedBy', 'updatedAt'])
+        && data.vaultPasswordHash is string && data.vaultPasswordHash.size() >= 1 && data.vaultPasswordHash.size() <= 128
+        && isValidId(data.updatedBy) && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time;
+    }
+
+    // --- Collection Rules ---
+
+    match /test/connection {
+      allow get: if isSignedIn();
+    }
+
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
+    }
+
+    match /subjects/{subjectId} {
+      allow get: if isValidId(subjectId) && isVerifiedUser();
+      allow list: if isVerifiedUser() && existing().isPublished == true;
+      allow create: if isValidId(subjectId) && isAdmin() && isValidSubject(incoming()) && incoming().id == subjectId;
+      allow update: if isValidId(subjectId) && isAdmin() && isValidSubject(incoming())
+        && incoming().id == existing().id
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'isPublished', 'sections', 'updatedBy', 'updatedAt']);
+      allow delete: if isValidId(subjectId) && isAdmin();
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && (incoming().role == 'student' || isAdmin());
+      allow update: if isValidId(userId) && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && (
+          (isOwner(userId) && incoming().role == existing().role && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'phone', 'photoUrl', 'passwordHash', 'updatedAt'])) ||
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'phone', 'photoUrl', 'passwordHash', 'role', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isAdmin();
+
+      match /progress/{itemId} {
+        allow get: if isValidId(userId) && isValidId(itemId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && existing().uid == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(itemId) && isOwner(userId) && isValidWatchProgress(incoming(), userId, itemId);
+        allow update: if isValidId(userId) && isValidId(itemId) && isOwner(userId) && isValidWatchProgress(incoming(), userId, itemId)
+          && incoming().uid == existing().uid
+          && incoming().itemId == existing().itemId
+          && incoming().diff(existing()).affectedKeys().hasOnly(['subjectId', 'sectionId', 'currentTime', 'duration', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(itemId) && isOwner(userId);
+      }
+
+      match /downloads/{itemId} {
+        allow get: if isValidId(userId) && isValidId(itemId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && existing().uid == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(itemId) && isOwner(userId) && isValidDownloadRecord(incoming(), userId, itemId);
+        allow update: if isValidId(userId) && isValidId(itemId) && isOwner(userId) && isValidDownloadRecord(incoming(), userId, itemId)
+          && incoming().uid == existing().uid
+          && incoming().itemId == existing().itemId
+          && incoming().diff(existing()).affectedKeys().hasOnly(['subjectId', 'sectionId', 'sectionTitle', 'classNumber', 'videoName', 'videoUrl', 'pdfUrl', 'fileSizeBytes', 'downloadedAt']);
+        allow delete: if isValidId(userId) && isValidId(itemId) && isOwner(userId);
+      }
+    }
+
+    match /notifications/{notifId} {
+      allow get: if isValidId(notifId) && isVerifiedUser();
+      allow list: if isVerifiedUser() && existing().isActive == true;
+      allow create: if isValidId(notifId) && isAdmin() && isValidNotification(incoming(), notifId);
+      allow update: if isValidId(notifId) && isAdmin() && isValidNotification(incoming(), notifId)
+        && incoming().id == existing().id
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['isActive', 'message']);
+      allow delete: if isValidId(notifId) && isAdmin();
+    }
+
+    match /adminInbox/{messageId} {
+      allow get: if isValidId(messageId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(messageId) && isVerifiedUser() && isValidInboxMessage(incoming(), messageId);
+      allow delete: if isValidId(messageId) && isAdmin();
+    }
+
+    match /adminConfig/{configId} {
+      allow get: if isValidId(configId) && isAdmin();
+      allow create: if isValidId(configId) && isAdmin() && isValidAdminConfig(incoming());
+      allow update: if isValidId(configId) && isAdmin() && isValidAdminConfig(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(['vaultPasswordHash', 'updatedBy', 'updatedAt']);
+    }
+  }
+}

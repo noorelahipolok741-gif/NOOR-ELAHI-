@@ -1,0 +1,103 @@
+@import "tailwindcss";
+@import "plyr/dist/plyr.css";
+
+@layer base {
+  html,
+  body {
+    background-color: #020617;
+    color: #f1f5f9;
+    font-family: "Hind Siliguri", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+    overscroll-behavior: none;
+    overscroll-behavior-y: contain;
+    touch-action: pan-x pan-y;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+    overflow-x: hidden;
+  }
+
+  button,
+  [role="button"] {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+}
+
+.font-display {
+  font-family: "Plus Jakarta Sans", "Hind Siliguri", sans-serif;
+}
+
+.font-mono-num {
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-safe {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.pt-safe {
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+
+/* Plyr Dark Pro Theme Integration */
+.plyr {
+  --plyr-color-main: #10b981;
+  --plyr-video-background: #020617;
+  --plyr-menu-background: rgba(15, 23, 42, 0.96);
+  --plyr-menu-color: #e2e8f0;
+  --plyr-menu-border-color: rgba(148, 163, 184, 0.2);
+  --plyr-font-family: "Plus Jakarta Sans", "Hind Siliguri", sans-serif;
+  border-radius: 1rem;
+  overflow: hidden;
+}
+
+.plyr--video .plyr__control--overlaid {
+  display: none !important;
+}
+
+/* Liquid Download Wave Animation */
+@keyframes liquidWaveShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes liquidShimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(200%);
+  }
+}
+
+.liquid-fill-bar {
+  background: linear-gradient(90deg, #059669, #06b6d4, #3b82f6, #8b5cf6, #10b981);
+  background-size: 300% 100%;
+  animation: liquidWaveShift 4s ease infinite;
+}
+
+.liquid-shimmer {
+  animation: liquidShimmer 1.8s ease-in-out infinite;
+}
+
+/* Custom thin dark scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 9999px;
+}

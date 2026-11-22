@@ -1,0 +1,6 @@
+{
+  "name": "NOOR ELAHI",
+  "description": "বাংলাদেশের সকল শ্রেণির শিক্ষার্থীদের জন্য বিষয়ভিত্তিক স্মার্ট লার্নিং প্ল্যাটফর্ম।",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
