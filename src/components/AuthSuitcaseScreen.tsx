@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Camera, Check, Chrome, Copy, Lock, Phone, User, WifiOff } from 'lucide-react';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { useBackOverlay } from '../hooks/useBackHandler';
 
 interface AuthSuitcaseScreenProps {
   onGoogleLogin: (prefill: { name: string; password: string; photoUrl: string }) => Promise<void>;
@@ -65,6 +66,7 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
   const isOnline = useOnlineStatus();
   const [suitcaseOpen, setSuitcaseOpen] = useState(true);
   const [showNumberForm, setShowNumberForm] = useState(false);
+  useBackOverlay(showNumberForm, () => setShowNumberForm(false), 'auth-number-form');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');

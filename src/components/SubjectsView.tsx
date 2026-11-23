@@ -22,12 +22,15 @@ import {
   SubjectMeta,
 } from '../types';
 import { LiquidDownloadBox } from './LiquidDownloadBox';
+import { useBackOverlay } from '../hooks/useBackHandler';
 
 interface SubjectsViewProps {
   subjects: Record<string, SubjectDoc>;
   downloads: Record<string, DownloadRecord>;
   downloadTasks: Record<string, DownloadTask>;
   isOnline: boolean;
+  selectedSubjectId?: string | null;
+  onSelectSubjectId?: (subjectId: string | null) => void;
   onPlayVideo: (payload: {
     item: ClassItem;
     subjectId: string;
@@ -85,14 +88,28 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
   downloads,
   downloadTasks,
   isOnline,
+  selectedSubjectId: controlledSubjectId,
+  onSelectSubjectId,
   onPlayVideo,
   onOpenPdf,
   onOfflineAlert,
 }) => {
-  const [selectedSubjectId, setSelectedSubjectId] = useState<string | null>(null);
+  const [localSubjectId, setLocalSubjectId] = useState<string | null>(null);
+  const selectedSubjectId =
+    controlledSubjectId !== undefined ? controlledSubjectId : localSubjectId;
+  const setSelectedSubjectId = (id: string | null) => {
+    if (onSelectSubjectId) {
+      onSelectSubjectId(id);
+    } else {
+      setLocalSubjectId(id);
+    }
+  };
+
   const [tourOpen, setTourOpen] = useState(false);
   const [tourReadingAll, setTourReadingAll] = useState(false);
   const [tourIndex, setTourIndex] = useState(0);
+
+  useBackOverlay(tourOpen, () => setTourOpen(false), 'subject-tour');
 
   const selectedMeta: SubjectMeta | undefined = useMemo(
     () => SUBJECT_LIST.find((s) => s.id === selectedSubjectId),

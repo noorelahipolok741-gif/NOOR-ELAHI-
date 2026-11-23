@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ChevronRight,
@@ -10,12 +10,15 @@ import {
 } from 'lucide-react';
 import { ClassItem, SUBJECT_LIST, SubjectDoc, SubjectSection } from '../types';
 import { auth, sha256Hex } from '../lib/firebase';
+import { normalizeMediaUrl } from '../lib/offlineStorage';
 
 interface FileVaultModalProps {
   isOpen: boolean;
   onClose: () => void;
   subjects: Record<string, SubjectDoc>;
   storedVaultHash: string | null;
+  selectedSubjectId?: string | null;
+  onSelectSubjectId?: (subjectId: string | null) => void;
   onSaveVaultPasswordHash: (hash: string) => Promise<void>;
   onSaveSubject: (
     subject: SubjectDoc,
@@ -32,6 +35,8 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
   onClose,
   subjects,
   storedVaultHash,
+  selectedSubjectId: controlledSubjectId,
+  onSelectSubjectId,
   onSaveVaultPasswordHash,
   onSaveSubject,
 }) => {
@@ -40,11 +45,33 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
   const [passError, setPassError] = useState('');
   const [savingPass, setSavingPass] = useState(false);
 
-  const [editingSubjectId, setEditingSubjectId] = useState<string | null>(null);
+  const [localEditingSubjectId, setLocalEditingSubjectId] = useState<string | null>(null);
+  const editingSubjectId =
+    controlledSubjectId !== undefined ? controlledSubjectId : localEditingSubjectId;
+  const setEditingSubjectId = (id: string | null) => {
+    if (onSelectSubjectId) {
+      onSelectSubjectId(id);
+    } else {
+      setLocalEditingSubjectId(id);
+    }
+  };
+
   const [draftDescription, setDraftDescription] = useState('');
   const [draftSections, setDraftSections] = useState<SubjectSection[]>([]);
   const [savingSubject, setSavingSubject] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
+
+  useEffect(() => {
+    if (!isOpen || !editingSubjectId) return;
+    const existing = subjects[editingSubjectId];
+    setDraftDescription(existing?.description || '');
+    setDraftSections(
+      existing?.sections
+        ? JSON.parse(JSON.stringify(existing.sections))
+        : []
+    );
+    setSaveMessage('');
+  }, [isOpen, editingSubjectId]);
 
   if (!isOpen) return null;
 
@@ -97,7 +124,6 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
 
   const openSubjectEditor = (subjectId: string) => {
     const existing = subjects[subjectId];
-    setEditingSubjectId(subjectId);
     setDraftDescription(existing?.description || '');
     setDraftSections(
       existing?.sections
@@ -105,6 +131,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
         : []
     );
     setSaveMessage('');
+    setEditingSubjectId(subjectId);
   };
 
   const addSectionBox = () => {
@@ -199,6 +226,17 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
     setSaveMessage('');
 
     try {
+      const normalizedSections: SubjectSection[] = draftSections.map((sec) => ({
+        ...sec,
+        items: (sec.items || []).map((it) => ({
+          ...it,
+          name: it.name.trim(),
+          duration: (it.duration || '').trim(),
+          videoUrl: it.videoUrl.trim() ? normalizeMediaUrl(it.videoUrl) : '',
+          pdfUrl: it.pdfUrl.trim() ? normalizeMediaUrl(it.pdfUrl) : '',
+        })),
+      }));
+
       const prevDoc = subjects[editingSubjectId];
       const prevItemMap = new Map<string, ClassItem>();
       for (const s of prevDoc?.sections || []) {
@@ -208,7 +246,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
       }
 
       const addedItems: Array<{ sectionTitle: string; itemName: string }> = [];
-      for (const sec of draftSections) {
+      for (const sec of normalizedSections) {
         for (const it of sec.items) {
           const prev = prevItemMap.get(it.id);
           const nowHasMedia = Boolean(it.videoUrl.trim() || it.pdfUrl.trim());
@@ -227,9 +265,10 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
         name: meta.name,
         description: draftDescription.trim(),
         isPublished: true,
-        sections: draftSections,
+        sections: normalizedSections,
       };
 
+      setDraftSections(normalizedSections);
       await onSaveSubject(nextDoc, addedItems);
       setSaveMessage('সফলভাবে সেভ এবং আপডেট হয়েছে!');
     } catch {

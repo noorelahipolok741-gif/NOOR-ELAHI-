@@ -32,6 +32,7 @@ import {
   StoragePermissionStatus,
 } from '../lib/offlineStorage';
 import { StoragePermissionModal } from './StoragePermissionModal';
+import { useBackOverlay } from '../hooks/useBackHandler';
 
 interface DownloadsViewProps {
   uid: string;
@@ -39,6 +40,8 @@ interface DownloadsViewProps {
   downloads: Record<string, DownloadRecord>;
   downloadTasks: Record<string, DownloadTask>;
   isOnline: boolean;
+  selectedSubjectId?: string | null;
+  onSelectSubjectId?: (subjectId: string | null) => void;
   onOfflineAlert: () => void;
   onPlayDownloaded: (record: DownloadRecord) => void;
   onOpenDownloadedPdf: (record: DownloadRecord) => void;
@@ -57,13 +60,25 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
   downloads,
   downloadTasks,
   isOnline,
+  selectedSubjectId: controlledSubjectId,
+  onSelectSubjectId,
   onOfflineAlert,
   onPlayDownloaded,
   onOpenDownloadedPdf,
   onDeleteDownload,
   onRestoreMatchedRecords,
 }) => {
-  const [selectedSubjectId, setSelectedSubjectId] = useState<string | null>(null);
+  const [localSubjectId, setLocalSubjectId] = useState<string | null>(null);
+  const selectedSubjectId =
+    controlledSubjectId !== undefined ? controlledSubjectId : localSubjectId;
+  const setSelectedSubjectId = (id: string | null) => {
+    if (onSelectSubjectId) {
+      onSelectSubjectId(id);
+    } else {
+      setLocalSubjectId(id);
+    }
+  };
+
   const [confirmDeleteItem, setConfirmDeleteItem] = useState<DownloadRecord | null>(null);
   const [showScanPrompt, setShowScanPrompt] = useState(false);
   const [scanResultMsg, setScanResultMsg] = useState<string | null>(null);
@@ -71,6 +86,10 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
   const [permModalOpen, setPermModalOpen] = useState(false);
   const [permStatus, setPermStatus] = useState<StoragePermissionStatus | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+
+  useBackOverlay(Boolean(confirmDeleteItem), () => setConfirmDeleteItem(null), 'dl-confirm-delete');
+  useBackOverlay(showScanPrompt, () => setShowScanPrompt(false), 'dl-scan-prompt');
+  useBackOverlay(permModalOpen, () => setPermModalOpen(false), 'dl-storage-perm');
 
   const refreshPermStatus = () => {
     getStoragePermissionStatus()

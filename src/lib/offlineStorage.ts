@@ -159,38 +159,211 @@ export async function listOfflineMedia(): Promise<OfflineMediaEntry[]> {
   });
 }
 
+export function normalizeMediaUrl(rawUrl: string): string {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:') || trimmed.startsWith('/')) {
+    return trimmed;
+  }
+  let target = trimmed;
+  if (/\s/.test(target)) {
+    const match = target.match(/https?:\/\/[^\s<>"']+/i);
+    if (match?.[0]) target = match[0];
+  }
+  const withProto = /^https?:\/\//i.test(target) ? target : `https://${target}`;
+  try {
+    const u = new URL(withProto);
+    if (
+      (u.hostname.includes('docs.google.com') || u.hostname.includes('drive.google.com')) &&
+      (u.pathname.includes('/gview') || u.pathname.includes('/viewer'))
+    ) {
+      const inner = u.searchParams.get('url');
+      if (inner && /^https?:\/\//i.test(inner)) {
+        return normalizeMediaUrl(inner);
+      }
+    }
+    if (u.pathname.toLowerCase().endsWith('/viewer.html') && u.searchParams.get('file')) {
+      const innerFile = u.searchParams.get('file')!;
+      if (/^https?:\/\//i.test(innerFile)) {
+        return normalizeMediaUrl(innerFile);
+      }
+    }
+    if (u.hostname.includes('dropbox.com')) {
+      u.searchParams.delete('dl');
+      u.searchParams.set('raw', '1');
+      return u.toString();
+    }
+    if (u.hostname === 'github.com' && u.pathname.includes('/blob/')) {
+      return `https://raw.githubusercontent.com${u.pathname.replace('/blob/', '/')}`;
+    }
+    if (u.hostname.includes('pixeldrain.com')) {
+      const m = u.pathname.match(/^\/u\/([a-zA-Z0-9_-]+)/);
+      if (m?.[1]) {
+        return `https://pixeldrain.com/api/file/${m[1]}`;
+      }
+    }
+    return u.toString();
+  } catch {
+    return withProto;
+  }
+}
+
+export function extractGoogleDriveFileId(rawUrl: string): string | null {
+  try {
+    const u = new URL(normalizeMediaUrl(rawUrl));
+    if (
+      !u.hostname.includes('drive.google.com') &&
+      !u.hostname.includes('docs.google.com') &&
+      !u.hostname.includes('drive.usercontent.google.com')
+    ) {
+      return null;
+    }
+    const pathMatch =
+      u.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
+      u.pathname.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    if (pathMatch?.[1]) return pathMatch[1];
+    const idParam = u.searchParams.get('id');
+    if (idParam && /^[a-zA-Z0-9_-]+$/.test(idParam)) return idParam;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function extractGoogleDocsPreviewUrl(rawUrl: string): string | null {
+  try {
+    const u = new URL(normalizeMediaUrl(rawUrl));
+    if (u.hostname.includes('docs.google.com')) {
+      const m = u.pathname.match(/\/(document|presentation|spreadsheets)\/d\/([a-zA-Z0-9_-]+)/);
+      if (m?.[1] && m?.[2]) {
+        return `https://docs.google.com/${m[1]}/d/${m[2]}/preview`;
+      }
+    }
+    const driveId = extractGoogleDriveFileId(rawUrl);
+    if (driveId) {
+      return `https://drive.google.com/file/d/${driveId}/preview`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function extractYouTubeVideoId(rawUrl: string): string | null {
+  try {
+    const u = new URL(normalizeMediaUrl(rawUrl));
+    const host = u.hostname.toLowerCase();
+    if (host === 'youtu.be' || host.endsWith('.youtu.be')) {
+      const id = u.pathname.replace(/^\/+/, '').split('/')[0];
+      return id || null;
+    }
+    if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
+      const v = u.searchParams.get('v');
+      if (v) return v;
+      const m = u.pathname.match(/\/(?:embed|shorts|live|v)\/([a-zA-Z0-9_-]+)/);
+      if (m?.[1]) return m[1];
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function extractVimeoVideoId(rawUrl: string): string | null {
+  try {
+    const u = new URL(normalizeMediaUrl(rawUrl));
+    if (!u.hostname.toLowerCase().includes('vimeo.com')) return null;
+    const m = u.pathname.match(/\/(?:video\/)?(\d+)/);
+    return m?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
+export function extractDirectVideoEmbedUrl(rawUrl: string): string | null {
+  const ytId = extractYouTubeVideoId(rawUrl);
+  if (ytId) {
+    return `https://www.youtube.com/embed/${ytId}?playsinline=1&rel=0&modestbranding=1`;
+  }
+  const vimeoId = extractVimeoVideoId(rawUrl);
+  if (vimeoId) {
+    return `https://player.vimeo.com/video/${vimeoId}?playsinline=1`;
+  }
+  try {
+    const norm = normalizeMediaUrl(rawUrl);
+    const u = new URL(norm);
+    const host = u.hostname.toLowerCase();
+    if (host.includes('dailymotion.com') || host === 'dai.ly') {
+      const m = host === 'dai.ly'
+        ? u.pathname.match(/^\/([a-zA-Z0-9]+)/)
+        : u.pathname.match(/\/(?:embed\/)?video\/([a-zA-Z0-9]+)/);
+      if (m?.[1]) return `https://www.dailymotion.com/embed/video/${m[1]}`;
+    }
+    if (host.includes('loom.com')) {
+      const m = u.pathname.match(/\/(?:share|embed)\/([a-zA-Z0-9]+)/);
+      if (m?.[1]) return `https://www.loom.com/embed/${m[1]}`;
+    }
+    if (host.includes('streamable.com')) {
+      const m = u.pathname.match(/^\/(?:e\/)?([a-zA-Z0-9]+)$/);
+      if (m?.[1]) return `https://streamable.com/e/${m[1]}`;
+    }
+    if (host.includes('mediadelivery.net') && (u.pathname.includes('/play/') || u.pathname.includes('/embed/'))) {
+      return norm.replace('/play/', '/embed/');
+    }
+  } catch {
+    // Ignore parse error
+  }
+  return null;
+}
+
 export function isHlsUrl(url: string): boolean {
   return /\.m3u8(\?.*)?$/i.test(url.trim());
 }
 
 export function isUnsupportedVideoHost(url: string): boolean {
-  const lower = url.trim().toLowerCase();
-  return (
-    lower.includes('youtube.com/') ||
-    lower.includes('youtu.be/') ||
-    lower.includes('vimeo.com/')
-  );
+  return Boolean(extractDirectVideoEmbedUrl(url));
 }
 
-export function resolveStreamUrl(rawUrl: string): string {
-  const trimmed = rawUrl.trim();
-  if (!trimmed) return '';
-  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:') || trimmed.startsWith('/')) {
-    return trimmed;
+export function encodeProxyParam(url: string): string {
+  try {
+    const bytes = new TextEncoder().encode(url);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) {
+      bin += String.fromCharCode(bytes[i]);
+    }
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  } catch {
+    return encodeURIComponent(url);
   }
-  if (isHlsUrl(trimmed)) {
-    return trimmed;
-  }
-  return `/api/proxy-media?url=${encodeURIComponent(trimmed)}`;
 }
 
-export function resolveDownloadProxyUrl(rawUrl: string, filename: string): string {
-  const trimmed = rawUrl.trim();
-  if (!trimmed) return '';
-  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:') || trimmed.startsWith('/')) {
-    return trimmed;
+export function resolveStreamUrl(rawUrl: string, kind?: 'video' | 'pdf'): string {
+  const normalized = normalizeMediaUrl(rawUrl);
+  if (!normalized) return '';
+  if (normalized.startsWith('blob:') || normalized.startsWith('data:') || normalized.startsWith('/')) {
+    return normalized;
   }
-  return `/api/proxy-media?url=${encodeURIComponent(trimmed)}&filename=${encodeURIComponent(filename)}&download=1`;
+  if (isHlsUrl(normalized)) {
+    return normalized;
+  }
+  const kindParam = kind ? `&kind=${kind}` : '';
+  return `/api/proxy-media?u=${encodeURIComponent(encodeProxyParam(normalized))}${kindParam}`;
+}
+
+export function resolveHlsProxyUrl(rawUrl: string): string {
+  const normalized = normalizeMediaUrl(rawUrl);
+  if (!normalized) return '';
+  return `/api/proxy-hls?u=${encodeURIComponent(encodeProxyParam(normalized))}`;
+}
+
+export function resolveDownloadProxyUrl(rawUrl: string, filename: string, kind?: 'video' | 'pdf'): string {
+  const normalized = normalizeMediaUrl(rawUrl);
+  if (!normalized) return '';
+  if (normalized.startsWith('blob:') || normalized.startsWith('data:') || normalized.startsWith('/')) {
+    return normalized;
+  }
+  const kindParam = kind ? `&kind=${kind}` : '';
+  return `/api/proxy-media?u=${encodeURIComponent(encodeProxyParam(normalized))}&filename=${encodeURIComponent(filename)}&download=1${kindParam}`;
 }
 
 export function sanitizeBaseFilename(name: string): string {

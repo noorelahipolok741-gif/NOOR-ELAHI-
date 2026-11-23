@@ -1,5 +1,5 @@
-const CACHE_NAME = 'noor-elahi-v8';
-const FONT_CACHE = 'noor-elahi-fonts-v8';
+const CACHE_NAME = 'noor-elahi-v10';
+const FONT_CACHE = 'noor-elahi-fonts-v10';
 
 const CORE_SHELL_ASSETS = [
   '/',
@@ -19,6 +19,7 @@ const CORE_SHELL_ASSETS = [
   '/icon.svg',
   '/icon.svg?v=5',
   '/plyr.svg',
+  '/pdf.worker.min.mjs',
 ];
 
 const BYPASS_ORIGINS = [
@@ -275,11 +276,13 @@ self.addEventListener('fetch', (event) => {
 
       const isImmutableOrStatic =
         url.pathname.startsWith('/assets/') ||
+        url.pathname.startsWith('/pdfjs/') ||
         url.pathname.startsWith('/node_modules/.vite/deps/') ||
         url.pathname.startsWith('/icon') ||
         url.pathname.startsWith('/maskable') ||
         url.pathname.startsWith('/apple-touch-icon') ||
         url.pathname === '/plyr.svg' ||
+        url.pathname === '/pdf.worker.min.mjs' ||
         url.pathname === '/favicon.svg' ||
         url.pathname === '/manifest.json';
 

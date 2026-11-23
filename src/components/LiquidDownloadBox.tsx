@@ -12,6 +12,7 @@ import { DownloadTask } from '../types';
 import { downloadManager } from '../lib/downloadManager';
 import { isStoragePermissionConfigured } from '../lib/offlineStorage';
 import { StoragePermissionModal } from './StoragePermissionModal';
+import { useBackOverlay } from '../hooks/useBackHandler';
 
 interface LiquidDownloadBoxProps {
   itemId: string;
@@ -48,6 +49,7 @@ export const LiquidDownloadBox: React.FC<LiquidDownloadBoxProps> = ({
   onOfflineAttempt,
 }) => {
   const [permModalOpen, setPermModalOpen] = useState(false);
+  useBackOverlay(permModalOpen, () => setPermModalOpen(false), `box-storage-perm-${itemId}`);
 
   const beginDownload = () => {
     downloadManager.startDownload({

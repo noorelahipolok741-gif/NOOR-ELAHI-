@@ -141,6 +141,10 @@ function verifyToken(token: string): { uid: string; phone: string; exp: number }
 }
 
 function isPrivateIp(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  if (lower.startsWith('::ffff:')) {
+    return isPrivateIp(lower.slice(7));
+  }
   if (net.isIPv4(ip)) {
     const parts = ip.split('.').map(Number);
     if (parts[0] === 10) return true;
@@ -152,8 +156,7 @@ function isPrivateIp(ip: string): boolean {
     return false;
   }
   if (net.isIPv6(ip)) {
-    const norm = ip.toLowerCase();
-    if (norm === '::1' || norm.startsWith('fe80:') || norm.startsWith('fc') || norm.startsWith('fd')) {
+    if (lower === '::1' || lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd')) {
       return true;
     }
   }
@@ -181,88 +184,811 @@ async function validateExternalUrl(rawUrl: string): Promise<URL> {
   return parsed;
 }
 
-function extractGoogleDriveId(urlStr: string): string | null {
+function extractFirstHttpUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (/\s/.test(trimmed)) {
+    const match = trimmed.match(/https?:\/\/[^\s<>"']+/i);
+    if (match?.[0]) return match[0];
+  }
+  return trimmed;
+}
+
+function normalizeTargetUrl(rawUrl: string): string {
+  const cleaned = extractFirstHttpUrl(rawUrl);
+  const withProto = /^https?:\/\//i.test(cleaned) ? cleaned : `https://${cleaned}`;
+  try {
+    const u = new URL(withProto);
+    // Unwrap Google Docs/Drive gview or PDF.js viewer wrapper URLs
+    if (
+      (u.hostname.includes('docs.google.com') || u.hostname.includes('drive.google.com')) &&
+      (u.pathname.includes('/gview') || u.pathname.includes('/viewer'))
+    ) {
+      const inner = u.searchParams.get('url');
+      if (inner && /^https?:\/\//i.test(inner)) {
+        return normalizeTargetUrl(inner);
+      }
+    }
+    if (u.pathname.toLowerCase().endsWith('/viewer.html') && u.searchParams.get('file')) {
+      const innerFile = u.searchParams.get('file')!;
+      if (/^https?:\/\//i.test(innerFile)) {
+        return normalizeTargetUrl(innerFile);
+      }
+    }
+    if (u.hostname.includes('dropbox.com')) {
+      u.searchParams.delete('dl');
+      u.searchParams.set('raw', '1');
+      return u.toString();
+    }
+    if (u.hostname === 'github.com' && u.pathname.includes('/blob/')) {
+      return `https://raw.githubusercontent.com${u.pathname.replace('/blob/', '/')}`;
+    }
+    if (u.hostname.includes('pixeldrain.com')) {
+      const m = u.pathname.match(/^\/u\/([a-zA-Z0-9_-]+)/);
+      if (m?.[1]) {
+        return `https://pixeldrain.com/api/file/${m[1]}`;
+      }
+    }
+    if (u.hostname.includes('docs.google.com')) {
+      const m = u.pathname.match(/\/(document|presentation|spreadsheets)(?:\/u\/\d+)?\/d\/([a-zA-Z0-9_-]+)/);
+      if (m?.[1] && m?.[2]) {
+        if (m[1] === 'presentation') {
+          return `https://docs.google.com/presentation/d/${m[2]}/export/pdf`;
+        }
+        return `https://docs.google.com/${m[1]}/d/${m[2]}/export?format=pdf`;
+      }
+    }
+    return u.toString();
+  } catch {
+    return withProto;
+  }
+}
+
+function extractGoogleDriveInfo(urlStr: string): { id: string; resourceKey?: string } | null {
   try {
     const u = new URL(urlStr);
-    if (
-      !u.hostname.includes('drive.google.com') &&
-      !u.hostname.includes('docs.google.com') &&
-      !u.hostname.includes('drive.usercontent.google.com')
-    ) {
+    const isDriveHost =
+      u.hostname.includes('drive.google.com') ||
+      u.hostname.includes('drive.usercontent.google.com');
+    const isDocsFileHost =
+      u.hostname.includes('docs.google.com') &&
+      (/\/file(?:\/u\/\d+)?\/d\//.test(u.pathname) || u.pathname === '/open' || u.pathname === '/uc');
+
+    if (!isDriveHost && !isDocsFileHost) {
       return null;
     }
+    if (u.pathname.includes('/folders/')) {
+      return null;
+    }
+    const resourceKey = u.searchParams.get('resourcekey') || undefined;
     const pathMatch =
-      u.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
+      u.pathname.match(/\/file(?:\/u\/\d+)?\/d\/([a-zA-Z0-9_-]+)/) ||
       u.pathname.match(/\/d\/([a-zA-Z0-9_-]+)/);
-    if (pathMatch?.[1]) return pathMatch[1];
+    if (pathMatch?.[1]) return { id: pathMatch[1], resourceKey };
     const idParam = u.searchParams.get('id');
-    if (idParam && /^[a-zA-Z0-9_-]+$/.test(idParam)) return idParam;
+    if (idParam && /^[a-zA-Z0-9_-]+$/.test(idParam)) return { id: idParam, resourceKey };
     return null;
   } catch {
     return null;
   }
 }
 
-async function fetchMediaWithDriveBypass(
-  targetUrl: string,
-  rangeHeader?: string
-): Promise<globalThis.Response> {
-  const driveId = extractGoogleDriveId(targetUrl);
-  const fetchHeaders: Record<string, string> = {
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+function mergeCookiesFromResponse(cookieJar: Map<string, string>, res: globalThis.Response) {
+  const hdrs = res.headers as unknown as { getSetCookie?: () => string[] };
+  const rawCookies = typeof hdrs.getSetCookie === 'function'
+    ? hdrs.getSetCookie()
+    : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : []);
+
+  for (const line of rawCookies) {
+    const pair = line.split(';')[0]?.trim();
+    if (!pair) continue;
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx > 0) {
+      cookieJar.set(pair.slice(0, eqIdx).trim(), pair.slice(eqIdx + 1).trim());
+    }
+  }
+}
+
+function formatCookieHeader(cookieJar: Map<string, string>): string {
+  return Array.from(cookieJar.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join('; ');
+}
+
+const DEFAULT_BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+async function fetchWithCookieJar(
+  startUrl: string,
+  baseHeaders: Record<string, string>,
+  cookieJar: Map<string, string>
+): Promise<{ response: globalThis.Response; finalUrl: string }> {
+  let currentUrl = startUrl;
+  for (let hop = 0; hop < 10; hop += 1) {
+    await validateExternalUrl(currentUrl);
+    const reqHeaders: Record<string, string> = { ...baseHeaders };
+    const cookieStr = formatCookieHeader(cookieJar);
+    if (cookieStr) {
+      reqHeaders['Cookie'] = cookieStr;
+    }
+
+    const res = await fetch(currentUrl, { headers: reqHeaders, redirect: 'manual' });
+    mergeCookiesFromResponse(cookieJar, res);
+
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get('location');
+      if (!loc) return { response: res, finalUrl: currentUrl };
+      currentUrl = new URL(loc, currentUrl).toString();
+      continue;
+    }
+    return { response: res, finalUrl: currentUrl };
+  }
+  throw new Error('অতিরিক্ত রিডাইরেক্ট হয়েছে।');
+}
+
+async function readTextLimited(res: globalThis.Response, maxBytes = 1024 * 1024): Promise<string> {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } catch {
+    // Return what we collected
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf-8');
+}
+
+function decodeHtmlEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\u003d/gi, '=')
+    .replace(/\\u002f/gi, '/')
+    .replace(/\\\//g, '/');
+}
+
+function resolveCandidateUrl(raw: string, baseUrl: string): string | null {
+  try {
+    const cleaned = decodeHtmlEntities(raw.trim()).replace(/^['"]|['"]$/g, '');
+    if (
+      !cleaned ||
+      cleaned.startsWith('data:') ||
+      cleaned.startsWith('blob:') ||
+      cleaned.startsWith('javascript:') ||
+      cleaned.startsWith('#')
+    ) {
+      return null;
+    }
+    const u = new URL(cleaned, baseUrl);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    // Unwrap Google gview/viewer or PDF.js viewer?file= params relative to baseUrl
+    if (
+      (u.hostname.includes('docs.google.com') || u.hostname.includes('drive.google.com')) &&
+      (u.pathname.includes('/gview') || u.pathname.includes('/viewer'))
+    ) {
+      const inner = u.searchParams.get('url');
+      if (inner) return resolveCandidateUrl(inner, baseUrl);
+    }
+    if (u.pathname.toLowerCase().includes('viewer.html') && u.searchParams.get('file')) {
+      const innerFile = u.searchParams.get('file')!;
+      return resolveCandidateUrl(innerFile, u.toString());
+    }
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+function extractDriveConfirmUrlFromHtml(html: string, driveId: string, resourceKey?: string): string | null {
+  const formMatch = html.match(/<form[^>]+id=["']download-form["'][^>]*action=["']([^"']+)["'][^>]*>/i)
+    || html.match(/<form[^>]+action=["']([^"']+)["'][^>]*>/i);
+  const actionUrl = formMatch?.[1]
+    ? decodeHtmlEntities(formMatch[1])
+    : 'https://drive.usercontent.google.com/download';
+
+  const params = new URLSearchParams();
+  const inputTags = html.match(/<input[^>]*>/gi) || [];
+  for (const tag of inputTags) {
+    const nameMatch = tag.match(/name=(?:["']([^"']+)["']|([^\s>]+))/i);
+    const valMatch = tag.match(/value=(?:["']([^"']*)["']|([^\s>]+))/i);
+    const name = nameMatch?.[1] || nameMatch?.[2];
+    const value = valMatch?.[1] ?? valMatch?.[2] ?? '';
+    if (name) {
+      params.set(name, decodeHtmlEntities(value));
+    }
+  }
+
+  if (params.has('id') || params.has('confirm') || params.has('uuid') || params.has('at')) {
+    if (!params.has('id')) params.set('id', driveId);
+    if (!params.has('export')) params.set('export', 'download');
+    if (!params.has('confirm')) params.set('confirm', 't');
+    if (resourceKey && !params.has('resourcekey')) params.set('resourcekey', resourceKey);
+    const resolved = actionUrl.startsWith('http')
+      ? actionUrl
+      : `https://drive.usercontent.google.com${actionUrl.startsWith('/') ? '' : '/'}${actionUrl}`;
+    const sep = resolved.includes('?') ? '&' : '?';
+    return `${resolved}${sep}${params.toString()}`;
+  }
+
+  const hrefMatch = html.match(/href=["']([^"']*export=download[^"']*)["']/i);
+  if (hrefMatch?.[1]) {
+    const rawHref = decodeHtmlEntities(hrefMatch[1]);
+    return rawHref.startsWith('http') ? rawHref : `https://drive.google.com${rawHref}`;
+  }
+
+  const jsonDlMatch = html.match(/"downloadUrl"\s*:\s*"([^"]+)"/i);
+  if (jsonDlMatch?.[1]) {
+    return decodeHtmlEntities(jsonDlMatch[1]);
+  }
+
+  return null;
+}
+
+function extractDriveVideoStreamsFromViewHtml(html: string): string[] {
+  const candidates: string[] = [];
+  const rawMatch = html.match(/"url_encoded_fmt_stream_map"\s*:\s*"([^"]+)"/)
+    || html.match(/"fmt_stream_map"\s*:\s*"([^"]+)"/);
+  if (rawMatch?.[1]) {
+    const decoded = decodeHtmlEntities(rawMatch[1]);
+    for (const part of decoded.split(',')) {
+      const pipeParts = part.split('|');
+      const maybeUrl = pipeParts[1] || '';
+      if (maybeUrl.startsWith('http')) {
+        candidates.push(maybeUrl);
+      } else {
+        const sp = new URLSearchParams(part);
+        const u = sp.get('url');
+        if (u && u.startsWith('http')) candidates.push(u);
+      }
+    }
+  }
+  const videoPlaybackMatches = html.match(/https?:\/\/[^"'\s<>\\]*googlevideo\.com\/videoplayback[^"'\s<>\\]*/gi) || [];
+  for (const m of videoPlaybackMatches) {
+    candidates.push(decodeHtmlEntities(m));
+  }
+  return Array.from(new Set(candidates));
+}
+
+function toKnownEmbedUrl(rawUrl: string): string | null {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    if (host === 'youtu.be' || host.endsWith('.youtu.be')) {
+      const id = u.pathname.replace(/^\/+/, '').split('/')[0];
+      if (id) return `https://www.youtube.com/embed/${id}?playsinline=1&rel=0&modestbranding=1`;
+    }
+    if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
+      const v = u.searchParams.get('v');
+      if (v) return `https://www.youtube.com/embed/${v}?playsinline=1&rel=0&modestbranding=1`;
+      const m = u.pathname.match(/\/(?:embed|shorts|live|v)\/([a-zA-Z0-9_-]+)/);
+      if (m?.[1]) return `https://www.youtube.com/embed/${m[1]}?playsinline=1&rel=0&modestbranding=1`;
+    }
+    if (host.includes('vimeo.com')) {
+      const m = u.pathname.match(/\/(?:video\/)?(\d+)/);
+      if (m?.[1]) return `https://player.vimeo.com/video/${m[1]}?playsinline=1`;
+    }
+    if (host.includes('dailymotion.com') || host === 'dai.ly') {
+      const m = host === 'dai.ly'
+        ? u.pathname.match(/^\/([a-zA-Z0-9]+)/)
+        : u.pathname.match(/\/(?:embed\/)?video\/([a-zA-Z0-9]+)/);
+      if (m?.[1]) return `https://www.dailymotion.com/embed/video/${m[1]}`;
+    }
+    if (host.includes('loom.com')) {
+      const m = u.pathname.match(/\/(?:share|embed)\/([a-zA-Z0-9]+)/);
+      if (m?.[1]) return `https://www.loom.com/embed/${m[1]}`;
+    }
+    if (host.includes('streamable.com')) {
+      const m = u.pathname.match(/^\/(?:e\/)?([a-zA-Z0-9]+)$/);
+      if (m?.[1]) return `https://streamable.com/e/${m[1]}`;
+    }
+    if (host.includes('mediadelivery.net') && (u.pathname.includes('/play/') || u.pathname.includes('/embed/'))) {
+      return rawUrl.replace('/play/', '/embed/');
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+interface ExtractedMediaCandidates {
+  directStreams: string[];
+  hlsStreams: string[];
+  embedUrls: string[];
+}
+
+function extractMediaFromHtml(
+  html: string,
+  baseUrl: string,
+  kind: 'video' | 'pdf' | ''
+): ExtractedMediaCandidates {
+  const directStreams: string[] = [];
+  const hlsStreams: string[] = [];
+  const embedUrls: string[] = [];
+  const decodedHtml = decodeHtmlEntities(html);
+
+  const pushDirect = (raw: string | undefined) => {
+    if (!raw) return;
+    const resolved = resolveCandidateUrl(raw, baseUrl);
+    if (!resolved || resolved === baseUrl) return;
+    if (/\.m3u8(\?|$|#)/i.test(resolved)) {
+      hlsStreams.push(resolved);
+    } else {
+      directStreams.push(resolved);
+    }
   };
-  if (rangeHeader) {
-    fetchHeaders['Range'] = rangeHeader;
+
+  const pushEmbed = (raw: string | undefined) => {
+    if (!raw) return;
+    const resolved = resolveCandidateUrl(raw, baseUrl);
+    if (!resolved) return;
+    const normalizedEmbed = toKnownEmbedUrl(resolved) || resolved;
+    embedUrls.push(normalizedEmbed);
+  };
+
+  // Meta refresh & JS redirect detection (common on redirect/shortener/download pages)
+  const metaRefresh =
+    html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url=([^"'\s;>]+)/i) ||
+    html.match(/<meta[^>]+content=["'][^"']*url=([^"'\s;>]+)["'][^>]+http-equiv=["']?refresh["']?/i);
+  if (metaRefresh?.[1]) pushDirect(metaRefresh[1]);
+
+  const jsRedirect = decodedHtml.match(/(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']|location\.replace\(\s*["']([^"']+)["']\)/i);
+  if (jsRedirect?.[1] || jsRedirect?.[2]) {
+    pushDirect(jsRedirect[1] || jsRedirect[2]);
   }
 
-  if (!driveId) {
-    return fetch(targetUrl, { headers: fetchHeaders, redirect: 'follow' });
+  // MediaFire download button & base64 scrambled URL
+  const mfBtn =
+    html.match(/<a[^>]+id=["']downloadButton["'][^>]+href=["']([^"']+)["']/i) ||
+    html.match(/href=["'](https?:\/\/download\d*\.mediafire\.com\/[^"']+)["']/i);
+  if (mfBtn?.[1]) pushDirect(mfBtn[1]);
+
+  const scrambledMatch = html.match(/data-scrambled-url=["']([^"']+)["']/i);
+  if (scrambledMatch?.[1]) {
+    try {
+      const decodedUrl = Buffer.from(scrambledMatch[1], 'base64').toString('utf-8');
+      if (/^https?:\/\//i.test(decodedUrl)) pushDirect(decodedUrl);
+    } catch {
+      // Ignore malformed base64
+    }
   }
 
-  const directUrl = `https://drive.usercontent.google.com/download?id=${driveId}&export=download&confirm=t`;
-  let res = await fetch(directUrl, { headers: fetchHeaders, redirect: 'follow' });
-  const contentType = res.headers.get('content-type') || '';
+  if (kind === 'pdf') {
+    // 1. Academic / Citation / Meta PDF tags
+    const metaPdf =
+      html.match(/<meta[^>]+name=["']citation_pdf_url["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']citation_pdf_url["']/i);
+    if (metaPdf?.[1]) pushDirect(metaPdf[1]);
 
-  if (contentType.includes('text/html')) {
-    const html = await res.text();
-    const params = new URLSearchParams();
-    params.set('id', driveId);
-    params.set('export', 'download');
+    // 2. Explicit .pdf attributes & embeds
+    const embedPdfRegex = /<(?:iframe|embed|object)[^>]+(?:src|data)=["']([^"']+\.pdf(?:\?[^"']*)?)["']/gi;
+    let m: RegExpExecArray | null;
+    while ((m = embedPdfRegex.exec(html)) !== null) {
+      pushDirect(m[1]);
+    }
 
-    // Extract all hidden inputs from Drive virus-scan warning form
-    const inputRegex = /<input[^>]+type=["']hidden["'][^>]*>/gi;
-    const inputs = html.match(inputRegex) || [];
-    for (const tag of inputs) {
-      const nameMatch = tag.match(/name=["']([^"']+)["']/i);
-      const valMatch = tag.match(/value=["']([^"']*)["']/i);
-      if (nameMatch?.[1] && valMatch?.[1] !== undefined) {
-        params.set(nameMatch[1], valMatch[1]);
+    // 3. PDF.js viewer.html?file=... or Google gview/viewer?url=...
+    const viewerParamRegex = /(?:viewer\.html\?(?:[^"'\s<>]*&)?file=|\/(?:gview|viewer)\?(?:[^"'\s<>]*&)?url=)([^"'\s<>&]+)/gi;
+    while ((m = viewerParamRegex.exec(decodedHtml)) !== null) {
+      try {
+        pushDirect(decodeURIComponent(m[1]));
+      } catch {
+        pushDirect(m[1]);
       }
     }
 
-    if (!params.has('confirm')) {
-      const confirmMatch =
-        html.match(/name="confirm"\s+value="([^"]+)"/) ||
-        html.match(/confirm=([0-9A-Za-z_-]+)/);
-      params.set('confirm', confirmMatch?.[1] || 't');
+    // 4. Data attributes & PDFObject.embed(...)
+    const dataPdfRegex = /(?:data-(?:pdf-url|pdf|file|download-url)|PDFObject\.embed\()\s*(?:=\s*)?["']([^"']+)["']/gi;
+    while ((m = dataPdfRegex.exec(decodedHtml)) !== null) {
+      pushDirect(m[1]);
     }
 
-    const setCookieHeader = res.headers.get('set-cookie');
-    const bypassHeaders: Record<string, string> = { ...fetchHeaders };
-    if (setCookieHeader) {
-      bypassHeaders['Cookie'] = setCookieHeader
-        .split(',')
-        .map((c) => c.split(';')[0]?.trim())
-        .filter(Boolean)
-        .join('; ');
+    // 5. JSON / JS fields commonly used by Dropbox, OneDrive, Drive, CMS & portals
+    const jsonPdfRegex = /"(?:@microsoft\.graph\.downloadUrl|@content\.downloadUrl|downloadUrl|download_url|pdfUrl|pdf_url|fileUrl|file_url|documentUrl|attachmentUrl|contentUrl|preview_url)"\s*:\s*"([^"]+)"/gi;
+    while ((m = jsonPdfRegex.exec(decodedHtml)) !== null) {
+      pushDirect(m[1]);
     }
 
-    const bypassUrl = `https://drive.usercontent.google.com/download?${params.toString()}`;
-    res = await fetch(bypassUrl, { headers: bypassHeaders, redirect: 'follow' });
+    // 6. Anchor tags ending in .pdf
+    const anchorPdfRegex = /<a[^>]+href=["']([^"']+\.pdf(?:\?[^"']*)?)["']/gi;
+    while ((m = anchorPdfRegex.exec(html)) !== null) {
+      pushDirect(m[1]);
+    }
+
+    // 7. Embedded <embed>/<object>/<iframe> pointing to PDFs, Drive, Docs, Dropbox, OneDrive, or viewer endpoints without .pdf extension
+    const allFrameEmbedRegex = /<(?:embed|object|iframe)[^>]+(?:src|data)=["']([^"']+)["'][^>]*>/gi;
+    while ((m = allFrameEmbedRegex.exec(html)) !== null) {
+      const fullTag = m[0];
+      const target = m[1];
+      if (
+        /application\/pdf|\.pdf|drive\.google\.com|docs\.google\.com|dropbox\.com|1drv\.ms|onedrive|sharepoint|mediafire|pixeldrain|pdf|viewer|download|file=|doc=/i.test(
+          `${fullTag} ${target}`
+        )
+      ) {
+        pushDirect(target);
+      }
+    }
+
+    // 8. Anchor links pointing to cloud PDF hosts or marked with download/PDF cues
+    const allAnchorRegex = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+    while ((m = allAnchorRegex.exec(html)) !== null) {
+      const attrs = m[1] || '';
+      const inner = (m[2] || '').replace(/<[^>]+>/g, ' ').trim();
+      const hrefMatch = attrs.match(/\bhref=["']([^"']+)["']/i);
+      const href = hrefMatch?.[1];
+      if (!href) continue;
+      if (
+        /drive\.google\.com\/(?:file|open|uc)|docs\.google\.com\/(?:file|document|presentation|spreadsheets)|dropbox\.com|1drv\.ms|onedrive\.live\.com|sharepoint\.com|mediafire\.com|pixeldrain\.com|archive\.org\/download/i.test(href) ||
+        /\bdownload\b/i.test(attrs) ||
+        /(?:pdf|download|ডাউনলোড|পিডিএফ|নোট|sheet)/i.test(`${attrs} ${inner}`)
+      ) {
+        pushDirect(href);
+      }
+    }
+
+    // 9. Raw .pdf URLs (both absolute https://...pdf and quoted relative /...pdf) in unescaped HTML
+    const rawPdfUrls = decodedHtml.match(/https?:\/\/[^"'\s<>\\]+\.pdf(?:\?[^"'\s<>\\]*)?/gi) || [];
+    for (const u of rawPdfUrls) pushDirect(u);
+
+    const quotedRelPdf = decodedHtml.match(/["'](\/[^"'\s<>]+\.pdf(?:\?[^"'\s<>]*)?)["']/gi) || [];
+    for (const q of quotedRelPdf) pushDirect(q.slice(1, -1));
+
+    // 10. Cloud drive/file URLs present inside scripts/text
+    const cloudUrlMatches = decodedHtml.match(
+      /https?:\/\/(?:drive\.google\.com\/(?:file\/[^\s"'<>]+|open\?[^\s"'<>]+|uc\?[^\s"'<>]+)|docs\.google\.com\/(?:file|document|presentation|spreadsheets)\/[^\s"'<>]+|dl\.dropboxusercontent\.com\/[^\s"'<>]+|www\.dropbox\.com\/[^\s"'<>]+|1drv\.ms\/[^\s"'<>]+)/gi
+    ) || [];
+    for (const u of cloudUrlMatches) pushDirect(u);
+  } else {
+    // OpenGraph / Twitter video meta tags
+    const metaPatterns = [
+      /<meta[^>]+(?:property|name)=["'](?:og:video:secure_url|og:video:url|og:video|twitter:player:stream)["'][^>]+content=["']([^"']+)["']/gi,
+      /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:og:video:secure_url|og:video:url|og:video|twitter:player:stream)["']/gi,
+    ];
+    for (const rx of metaPatterns) {
+      let m: RegExpExecArray | null;
+      while ((m = rx.exec(html)) !== null) {
+        const cand = resolveCandidateUrl(m[1], baseUrl);
+        if (!cand) continue;
+        if (toKnownEmbedUrl(cand)) {
+          pushEmbed(cand);
+        } else {
+          pushDirect(cand);
+        }
+      }
+    }
+
+    // HTML5 <video> and <source> tags
+    const tagRegex = /<(?:video|source)[^>]+src=["']([^"']+)["']/gi;
+    let m: RegExpExecArray | null;
+    while ((m = tagRegex.exec(html)) !== null) {
+      pushDirect(m[1]);
+    }
+
+    // JSON / JS embedded video fields
+    const jsonVideoRegex = /"(?:contentUrl|hd_src|sd_src|hd_src_no_ratelimit|sd_src_no_ratelimit|playable_url_quality_hd|playable_url|videoUrl|video_url|streamUrl|mp4Url|hlsUrl)"\s*:\s*"([^"]+)"/gi;
+    while ((m = jsonVideoRegex.exec(decodedHtml)) !== null) {
+      const cand = resolveCandidateUrl(m[1], baseUrl);
+      if (!cand) continue;
+      if (toKnownEmbedUrl(cand)) {
+        pushEmbed(cand);
+      } else {
+        pushDirect(cand);
+      }
+    }
+
+    // Raw .mp4 / .m3u8 / .webm URLs inside scripts/markup
+    const rawMediaMatches = decodedHtml.match(/https?:\/\/[^"'\s<>\\]+\.(?:m3u8|mp4|webm|mov|m4v)(?:\?[^"'\s<>\\]*)?/gi) || [];
+    for (const u of rawMediaMatches) pushDirect(u);
+
+    // Embedded player <meta og:video> / twitter:player / <iframe src>
+    const twitterPlayer =
+      html.match(/<meta[^>]+name=["']twitter:player["'][^>]+content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:player["']/i);
+    if (twitterPlayer?.[1]) pushEmbed(twitterPlayer[1]);
+
+    const iframeRegex = /<iframe[^>]+src=["']([^"']+)["']/gi;
+    while ((m = iframeRegex.exec(html)) !== null) {
+      const src = m[1];
+      if (
+        toKnownEmbedUrl(resolveCandidateUrl(src, baseUrl) || '') ||
+        /player|embed|video|youtube|vimeo|dailymotion|bunny|mediadelivery|streamable|loom|wistia/i.test(src)
+      ) {
+        pushEmbed(src);
+      }
+    }
   }
 
-  return res;
+  return {
+    directStreams: Array.from(new Set(directStreams)),
+    hlsStreams: Array.from(new Set(hlsStreams)),
+    embedUrls: Array.from(new Set(embedUrls)),
+  };
+}
+
+interface ResolvedUpstreamMedia {
+  kind: 'stream' | 'hls' | 'embed' | 'error';
+  response?: globalThis.Response;
+  finalUrl?: string;
+  hlsUrl?: string;
+  embedUrl?: string;
+  errorMessage?: string;
+  statusCode?: number;
+}
+
+async function resolveAndFetchMedia(
+  targetUrl: string,
+  mediaKind: 'video' | 'pdf' | '',
+  rangeHeader?: string,
+  depth = 0,
+  sharedCookieJar?: Map<string, string>,
+  referer?: string,
+  visited: Set<string> = new Set()
+): Promise<ResolvedUpstreamMedia> {
+  if (depth > 4) {
+    return {
+      kind: 'error',
+      statusCode: 422,
+      errorMessage:
+        mediaKind === 'pdf'
+          ? 'এই লিংকে সরাসরি কোনো PDF ফাইল পাওয়া যায়নি।'
+          : 'এই লিংক থেকে সরাসরি কোনো ভিডিও খুঁজে পাওয়া যায়নি।',
+    };
+  }
+
+  const normalized = normalizeTargetUrl(targetUrl);
+  if (visited.has(normalized)) {
+    return {
+      kind: 'error',
+      statusCode: 422,
+      errorMessage:
+        mediaKind === 'pdf'
+          ? 'এই লিংকে সরাসরি কোনো PDF ফাইল পাওয়া যায়নি।'
+          : 'এই লিংক থেকে সরাসরি কোনো ভিডিও খুঁজে পাওয়া যায়নি।',
+    };
+  }
+  visited.add(normalized);
+
+  const cookieJar = sharedCookieJar || new Map<string, string>();
+  const baseHeaders: Record<string, string> = {
+    'User-Agent': DEFAULT_BROWSER_UA,
+    Accept:
+      mediaKind === 'pdf'
+        ? 'application/pdf,application/octet-stream,text/html,*/*;q=0.8'
+        : '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+  };
+  if (referer) {
+    baseHeaders['Referer'] = referer;
+  }
+  if (rangeHeader) {
+    baseHeaders['Range'] = rangeHeader;
+  }
+
+  const driveInfo = extractGoogleDriveInfo(normalized);
+  if (driveInfo) {
+    const rkParam = driveInfo.resourceKey
+      ? `&resourcekey=${encodeURIComponent(driveInfo.resourceKey)}`
+      : '';
+
+    const driveUrls = [
+      `https://drive.usercontent.google.com/download?id=${driveInfo.id}&export=download&confirm=t${rkParam}`,
+      `https://drive.google.com/uc?export=download&id=${driveInfo.id}&confirm=t${rkParam}`,
+    ];
+
+    for (const url of driveUrls) {
+      const { response: res, finalUrl } = await fetchWithCookieJar(url, baseHeaders, cookieJar);
+      if (finalUrl.includes('accounts.google.com')) {
+        res.body?.cancel().catch(() => {});
+        return {
+          kind: 'error',
+          statusCode: 422,
+          errorMessage: 'এই Google Drive ফাইলটি প্রাইভেট (Restricted) করা আছে। Google Drive-এ গিয়ে Share → "Anyone with the link" চালু করুন।',
+        };
+      }
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if ((res.ok || res.status === 206) && !ct.includes('text/html')) {
+        return { kind: 'stream', response: res, finalUrl };
+      }
+      if (ct.includes('text/html')) {
+        const html = await readTextLimited(res);
+        if (html.trimStart().startsWith('%PDF-')) {
+          const refetch = await fetchWithCookieJar(url, baseHeaders, cookieJar);
+          return { kind: 'stream', response: refetch.response, finalUrl: refetch.finalUrl };
+        }
+        const confirmUrl = extractDriveConfirmUrlFromHtml(html, driveInfo.id, driveInfo.resourceKey);
+        if (confirmUrl) {
+          const confirmed = await fetchWithCookieJar(confirmUrl, baseHeaders, cookieJar);
+          const confirmedCt = (confirmed.response.headers.get('content-type') || '').toLowerCase();
+          if ((confirmed.response.ok || confirmed.response.status === 206) && !confirmedCt.includes('text/html')) {
+            return { kind: 'stream', response: confirmed.response, finalUrl: confirmed.finalUrl };
+          }
+          confirmed.response.body?.cancel().catch(() => {});
+        }
+      } else {
+        res.body?.cancel().catch(() => {});
+      }
+    }
+
+    // Last-resort Google Drive video stream extraction from /view HTML (avoids cookie-asking /preview iframe!)
+    if (mediaKind !== 'pdf') {
+      const viewUrl = `https://drive.google.com/file/d/${driveInfo.id}/view${driveInfo.resourceKey ? `?resourcekey=${encodeURIComponent(driveInfo.resourceKey)}` : ''}`;
+      const viewRes = await fetchWithCookieJar(viewUrl, { 'User-Agent': DEFAULT_BROWSER_UA, Accept: 'text/html,*/*' }, cookieJar);
+      if (viewRes.finalUrl.includes('accounts.google.com')) {
+        viewRes.response.body?.cancel().catch(() => {});
+        return {
+          kind: 'error',
+          statusCode: 422,
+          errorMessage: 'এই Google Drive ভিডিওটি প্রাইভেট (Restricted) করা আছে। Google Drive-এ গিয়ে Share → "Anyone with the link" চালু করুন।',
+        };
+      }
+      const viewHtml = await readTextLimited(viewRes.response);
+      const streamCandidates = extractDriveVideoStreamsFromViewHtml(viewHtml);
+      for (const streamUrl of streamCandidates) {
+        try {
+          const sRes = await fetchWithCookieJar(streamUrl, { ...baseHeaders, Referer: viewUrl }, cookieJar);
+          const sCt = (sRes.response.headers.get('content-type') || '').toLowerCase();
+          if ((sRes.response.ok || sRes.response.status === 206) && !sCt.includes('text/html')) {
+            return { kind: 'stream', response: sRes.response, finalUrl: sRes.finalUrl };
+          }
+          sRes.response.body?.cancel().catch(() => {});
+        } catch {
+          // Try next stream quality candidate
+        }
+      }
+    }
+
+    return {
+      kind: 'error',
+      statusCode: 422,
+      errorMessage:
+        mediaKind === 'pdf'
+          ? 'Google Drive থেকে PDF ফাইলটি সরাসরি পাওয়া যায়নি। ফাইলটি "Anyone with the link (Viewer)" এবং ডাউনলোড চালু করা আছে কিনা নিশ্চিত করুন।'
+          : 'Google Drive থেকে ভিডিওটি চালু করা যায়নি। "Anyone with the link" ও ডাউনলোড অনুমতি চালু আছে কিনা দেখুন।',
+    };
+  }
+
+  // Non-Drive URLs: check if direct video embed first
+  if (mediaKind !== 'pdf') {
+    const knownEmbed = toKnownEmbedUrl(normalized);
+    if (knownEmbed) {
+      return { kind: 'embed', embedUrl: knownEmbed, finalUrl: normalized };
+    }
+  }
+
+  let { response: firstRes, finalUrl } = await fetchWithCookieJar(normalized, baseHeaders, cookieJar);
+  if (firstRes.status === 403 || firstRes.status === 406 || firstRes.status === 429 || firstRes.status === 503) {
+    firstRes.body?.cancel().catch(() => {});
+    const minimalHeaders: Record<string, string> = { Accept: '*/*' };
+    if (rangeHeader) minimalHeaders['Range'] = rangeHeader;
+    const retry = await fetchWithCookieJar(normalized, minimalHeaders, cookieJar);
+    firstRes = retry.response;
+    finalUrl = retry.finalUrl;
+  }
+  if (!firstRes.ok && firstRes.status !== 206) {
+    firstRes.body?.cancel().catch(() => {});
+    const safeStatus = firstRes.status === 401 || firstRes.status === 403 ? 422 : firstRes.status;
+    return {
+      kind: 'error',
+      statusCode: safeStatus,
+      errorMessage:
+        firstRes.status === 401 || firstRes.status === 403
+          ? 'এই ফাইলটির লিংক প্রাইভেট বা অ্যাক্সেস ব্লক করা (403)। ফাইলটি পাবলিক শেয়ার করা আছে কিনা দেখুন।'
+          : `লিংক থেকে ফাইল পাওয়া যায়নি (Status ${firstRes.status})।`,
+    };
+  }
+
+  const firstCt = (firstRes.headers.get('content-type') || '').toLowerCase();
+  if (firstCt.includes('mpegurl') || /\.m3u8(\?|$)/i.test(finalUrl)) {
+    firstRes.body?.cancel().catch(() => {});
+    return { kind: 'hls', hlsUrl: finalUrl, finalUrl };
+  }
+
+  if (!firstCt.includes('text/html')) {
+    return { kind: 'stream', response: firstRes, finalUrl };
+  }
+
+  // Redirected onto a Drive / Docs / Dropbox / Pixeldrain / GitHub URL after shortlink redirect
+  const postRedirectNorm = normalizeTargetUrl(finalUrl);
+  if (extractGoogleDriveInfo(postRedirectNorm) || postRedirectNorm !== finalUrl) {
+    if (!visited.has(postRedirectNorm)) {
+      firstRes.body?.cancel().catch(() => {});
+      return resolveAndFetchMedia(postRedirectNorm, mediaKind, rangeHeader, depth + 1, cookieJar, finalUrl, visited);
+    }
+  }
+
+  // Upstream returned text/html: check if misconfigured server sent raw %PDF- bytes or inspect HTML
+  const html = await readTextLimited(firstRes);
+  if (mediaKind === 'pdf' && html.trimStart().startsWith('%PDF-')) {
+    const refetch = await fetchWithCookieJar(finalUrl, baseHeaders, cookieJar);
+    return { kind: 'stream', response: refetch.response, finalUrl: refetch.finalUrl };
+  }
+
+  const extracted = extractMediaFromHtml(html, finalUrl, mediaKind);
+
+  // OneDrive / SharePoint direct download fallbacks when HTML wrapper is served
+  try {
+    const finalParsed = new URL(finalUrl);
+    if (finalParsed.hostname.includes('1drv.ms') || finalParsed.hostname.includes('onedrive.live.com')) {
+      const shareToken = `u!${Buffer.from(finalUrl, 'utf-8').toString('base64url')}`;
+      extracted.directStreams.unshift(`https://api.onedrive.com/v1.0/shares/${shareToken}/root/content`);
+      if (finalParsed.hostname.includes('onedrive.live.com') && finalParsed.pathname.includes('/redir')) {
+        const dlUrl = new URL(finalUrl);
+        dlUrl.pathname = dlUrl.pathname.replace('/redir', '/download');
+        dlUrl.searchParams.set('download', '1');
+        extracted.directStreams.unshift(dlUrl.toString());
+      }
+    } else if (finalParsed.hostname.includes('sharepoint.com') && !finalParsed.searchParams.has('download')) {
+      const spDl = new URL(finalUrl);
+      spDl.searchParams.delete('web');
+      spDl.searchParams.set('download', '1');
+      extracted.directStreams.unshift(spDl.toString());
+    } else if (finalParsed.hostname.includes('dropbox.com')) {
+      const dbDl = new URL(finalUrl);
+      dbDl.searchParams.delete('raw');
+      dbDl.searchParams.set('dl', '1');
+      extracted.directStreams.push(dbDl.toString());
+    }
+  } catch {
+    // Ignore URL parse error
+  }
+
+  for (const cand of extracted.directStreams.slice(0, 8)) {
+    try {
+      const subResult = await resolveAndFetchMedia(
+        cand,
+        mediaKind,
+        rangeHeader,
+        depth + 1,
+        cookieJar,
+        finalUrl,
+        visited
+      );
+      if (subResult.kind === 'stream' || subResult.kind === 'hls' || subResult.kind === 'embed') {
+        return subResult;
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  if (mediaKind !== 'pdf') {
+    if (extracted.hlsStreams.length > 0) {
+      return { kind: 'hls', hlsUrl: extracted.hlsStreams[0], finalUrl };
+    }
+    if (extracted.embedUrls.length > 0) {
+      return { kind: 'embed', embedUrl: extracted.embedUrls[0], finalUrl };
+    }
+
+    // Check if the webpage itself is frameable as a last resort for unknown video sites
+    const xfo = (firstRes.headers.get('x-frame-options') || '').toLowerCase();
+    const csp = (firstRes.headers.get('content-security-policy') || '').toLowerCase();
+    const blocksFrame =
+      xfo.includes('deny') ||
+      xfo.includes('sameorigin') ||
+      /frame-ancestors\s+(?:'none'|'self')/i.test(csp);
+    if (!blocksFrame && /<(?:video|iframe|source)\b/i.test(html)) {
+      return { kind: 'embed', embedUrl: finalUrl, finalUrl };
+    }
+  }
+
+  return {
+    kind: 'error',
+    statusCode: 422,
+    errorMessage:
+      mediaKind === 'pdf'
+        ? 'এই লিংকে সরাসরি কোনো PDF ফাইল পাওয়া যায়নি।'
+        : 'এই লিংক থেকে সরাসরি কোনো ভিডিও খুঁজে পাওয়া যায়নি।',
+  };
 }
 
 let cachedCerts: { certs: Record<string, string>; expiresAt: number } | null = null;
@@ -363,11 +1089,131 @@ async function startServer() {
     res.json({ ok: matched });
   });
 
-  // Media Proxy for Google Drive & CORS-restricted video/PDF links (Range-capable for Plyr + Download progress)
+  const extractQueryMediaUrl = (req: express.Request): string => {
+    const encoded = typeof req.query.u === 'string' ? req.query.u.trim() : '';
+    if (encoded) {
+      try {
+        const decoded = Buffer.from(encoded, 'base64url').toString('utf-8').trim();
+        if (decoded) return decoded;
+      } catch {
+        // Fallback to plain url query param
+      }
+    }
+    return typeof req.query.url === 'string' ? req.query.url.trim() : '';
+  };
+
+  // Universal Media Resolver for any video/PDF webpage or direct link
+  app.get('/api/resolve-media', async (req, res) => {
+    const rawUrl = extractQueryMediaUrl(req);
+    const mediaKind = req.query.kind === 'video' ? 'video' : req.query.kind === 'pdf' ? 'pdf' : '';
+    if (!rawUrl) {
+      res.status(400).json({ type: 'error', error: 'Missing url parameter' });
+      return;
+    }
+
+    try {
+      const normalizedUrl = normalizeTargetUrl(rawUrl);
+      await validateExternalUrl(normalizedUrl);
+
+      if (mediaKind !== 'pdf') {
+        const knownEmbed = toKnownEmbedUrl(normalizedUrl);
+        if (knownEmbed) {
+          res.json({ type: 'embed', embedUrl: knownEmbed });
+          return;
+        }
+      }
+
+      const resolved = await resolveAndFetchMedia(normalizedUrl, mediaKind);
+      if (resolved.kind === 'stream') {
+        resolved.response?.body?.cancel().catch(() => {});
+        const targetForProxy = resolved.finalUrl || normalizedUrl;
+        const b64 = Buffer.from(targetForProxy, 'utf-8').toString('base64url');
+        res.json({
+          type: 'direct',
+          streamUrl: `/api/proxy-media?u=${encodeURIComponent(b64)}${mediaKind ? `&kind=${mediaKind}` : ''}`,
+        });
+        return;
+      }
+      if (resolved.kind === 'hls' && resolved.hlsUrl) {
+        const b64 = Buffer.from(resolved.hlsUrl, 'utf-8').toString('base64url');
+        res.json({
+          type: 'hls',
+          hlsUrl: resolved.hlsUrl,
+          proxiedHlsUrl: `/api/proxy-hls?u=${encodeURIComponent(b64)}`,
+        });
+        return;
+      }
+      if (resolved.kind === 'embed' && resolved.embedUrl) {
+        res.json({ type: 'embed', embedUrl: resolved.embedUrl });
+        return;
+      }
+
+      res.status(resolved.statusCode || 422).json({
+        type: 'error',
+        error: resolved.errorMessage || 'মিডিয়া লিংকটি ওপেন করা যায়নি।',
+      });
+    } catch (err) {
+      res.status(400).json({
+        type: 'error',
+        error: err instanceof Error ? err.message : 'Invalid URL',
+      });
+    }
+  });
+
+  // CORS-safe HLS (.m3u8) playlist proxy
+  app.get('/api/proxy-hls', async (req, res) => {
+    const rawUrl = extractQueryMediaUrl(req);
+    if (!rawUrl) {
+      res.status(400).json({ error: 'Missing url parameter' });
+      return;
+    }
+    try {
+      const normalizedUrl = normalizeTargetUrl(rawUrl);
+      const cookieJar = new Map<string, string>();
+      const { response: upstream, finalUrl } = await fetchWithCookieJar(
+        normalizedUrl,
+        { 'User-Agent': DEFAULT_BROWSER_UA, Accept: '*/*' },
+        cookieJar
+      );
+      if (!upstream.ok) {
+        res.status(upstream.status).json({ error: `HLS playlist error (${upstream.status})` });
+        return;
+      }
+      const text = await readTextLimited(upstream, 2 * 1024 * 1024);
+      const rewritten = text
+        .split(/\r?\n/)
+        .map((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return line;
+          if (trimmed.startsWith('#')) {
+            return line.replace(/URI="([^"]+)"/gi, (_m, uri: string) => {
+              const abs = new URL(uri, finalUrl).toString();
+              const endpoint = /\.m3u8(\?|$)/i.test(abs) ? '/api/proxy-hls' : '/api/proxy-media';
+              const b64 = Buffer.from(abs, 'utf-8').toString('base64url');
+              return `URI="${endpoint}?u=${encodeURIComponent(b64)}"`;
+            });
+          }
+          const abs = new URL(trimmed, finalUrl).toString();
+          const endpoint = /\.m3u8(\?|$)/i.test(abs) ? '/api/proxy-hls' : '/api/proxy-media';
+          const b64 = Buffer.from(abs, 'utf-8').toString('base64url');
+          return `${endpoint}?u=${encodeURIComponent(b64)}&kind=video`;
+        })
+        .join('\n');
+
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.send(rewritten);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'HLS proxy error' });
+    }
+  });
+
+  // Media Proxy for Google Drive, webpages & CORS-restricted video/PDF links (Range-capable for Plyr + Download progress)
   app.get('/api/proxy-media', async (req, res) => {
-    const rawUrl = typeof req.query.url === 'string' ? req.query.url.trim() : '';
+    const rawUrl = extractQueryMediaUrl(req);
     const filename = typeof req.query.filename === 'string' ? req.query.filename.replace(/[^\w.\-\u0980-\u09FF ]+/g, '_') : '';
     const forceDownload = req.query.download === '1';
+    const mediaKind = req.query.kind === 'video' ? 'video' : req.query.kind === 'pdf' ? 'pdf' : '';
 
     if (!rawUrl) {
       res.status(400).json({ error: 'Missing url parameter' });
@@ -375,26 +1221,105 @@ async function startServer() {
     }
 
     try {
-      await validateExternalUrl(rawUrl);
+      const normalizedUrl = normalizeTargetUrl(rawUrl);
+      await validateExternalUrl(normalizedUrl);
       const rangeHeader = req.headers.range;
-      const upstream = await fetchMediaWithDriveBypass(rawUrl, rangeHeader);
+      const resolved = await resolveAndFetchMedia(normalizedUrl, mediaKind, rangeHeader);
 
-      if (!upstream.ok && upstream.status !== 206) {
-        res.status(upstream.status).json({ error: `ফাইল পাওয়া যায়নি (${upstream.status})` });
-        return;
-      }
-
-      const upstreamType = (upstream.headers.get('content-type') || '').toLowerCase();
-      if (upstreamType.includes('text/html')) {
+      if (resolved.kind === 'hls' && resolved.hlsUrl) {
         res.status(422).json({
-          error: 'লিংকটি পাবলিক বা সরাসরি ডাউনলোডযোগ্য নয় (Google Drive হলে "Anyone with the link" চালু করুন)।',
+          resolvedType: 'hls',
+          resolvedUrl: resolved.hlsUrl,
+          error: 'HLS স্ট্রিম পাওয়া গেছে।',
         });
         return;
       }
 
+      if (resolved.kind === 'embed' && resolved.embedUrl) {
+        res.status(422).json({
+          resolvedType: 'embed',
+          resolvedUrl: resolved.embedUrl,
+          error: 'এম্বেডেড ভিডিও প্লেয়ার পাওয়া গেছে।',
+        });
+        return;
+      }
+
+      if (resolved.kind !== 'stream' || !resolved.response) {
+        res.status(resolved.statusCode || 422).json({
+          error: resolved.errorMessage || 'ফাইল পাওয়া যায়নি।',
+        });
+        return;
+      }
+
+      const upstream = resolved.response;
+      const upstreamType = (upstream.headers.get('content-type') || '').toLowerCase();
+      if (upstreamType.includes('text/html')) {
+        upstream.body?.cancel().catch(() => {});
+        res.status(422).json({
+          error: 'লিংকটি সরাসরি ভিডিও বা PDF রিটার্ন করেনি।',
+        });
+        return;
+      }
+
+      if (!upstream.body) {
+        res.status(upstream.status);
+        res.end();
+        return;
+      }
+
+      const reader = upstream.body.getReader();
+      let closed = false;
+      req.on('close', () => {
+        closed = true;
+        reader.cancel().catch(() => {});
+      });
+
+      const firstRead = await reader.read();
+      const firstChunk = firstRead.value;
+
+      let resolvedContentType = upstream.headers.get('content-type') || '';
+      if (firstChunk && firstChunk.byteLength > 0) {
+        const headText = Buffer.from(firstChunk.subarray(0, Math.min(512, firstChunk.byteLength))).toString('utf-8').trimStart();
+        if (/^<!doctype\s+html|^<html[\s>]/i.test(headText)) {
+          reader.cancel().catch(() => {});
+          res.status(422).json({
+            error: 'লিংকটি সরাসরি ভিডিও বা PDF রিটার্ন করেনি।',
+          });
+          return;
+        }
+
+        const isPdfMagic = firstChunk.byteLength >= 4 && headText.includes('%PDF-');
+        const isGenericMime =
+          !resolvedContentType ||
+          upstreamType.includes('application/octet-stream') ||
+          upstreamType.includes('binary/octet-stream');
+
+        if (isPdfMagic || (isGenericMime && mediaKind === 'pdf')) {
+          resolvedContentType = 'application/pdf';
+        } else if (isGenericMime && mediaKind === 'video') {
+          const isWebm =
+            firstChunk.byteLength >= 4 &&
+            firstChunk[0] === 0x1a &&
+            firstChunk[1] === 0x45 &&
+            firstChunk[2] === 0xdf &&
+            firstChunk[3] === 0xa3;
+          resolvedContentType = isWebm ? 'video/webm' : 'video/mp4';
+        } else if (isGenericMime && firstChunk.byteLength >= 8) {
+          const box = Buffer.from(firstChunk.subarray(4, 8)).toString('ascii');
+          if (box === 'ftyp') {
+            resolvedContentType = 'video/mp4';
+          }
+        }
+      } else if (!resolvedContentType && mediaKind) {
+        resolvedContentType = mediaKind === 'pdf' ? 'application/pdf' : 'video/mp4';
+      }
+
       res.status(upstream.status);
+      if (resolvedContentType) {
+        res.setHeader('Content-Type', resolvedContentType);
+      }
+
       const passthroughHeaders = [
-        'content-type',
         'content-length',
         'content-range',
         'accept-ranges',
@@ -410,40 +1335,39 @@ async function startServer() {
       }
       if (forceDownload && filename) {
         res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+      } else {
+        res.setHeader('Content-Disposition', 'inline');
       }
       res.setHeader('Cache-Control', 'public, max-age=3600');
 
-      if (!upstream.body) {
-        res.end();
-        return;
+      const writeChunkWithBackpressure = async (chunk: Uint8Array) => {
+        if (!chunk || res.writableEnded || closed) return;
+        const canContinue = res.write(Buffer.from(chunk));
+        if (!canContinue && !closed) {
+          await new Promise<void>((resolve) => {
+            const onDrain = () => {
+              res.off('close', onClose);
+              resolve();
+            };
+            const onClose = () => {
+              res.off('drain', onDrain);
+              resolve();
+            };
+            res.once('drain', onDrain);
+            res.once('close', onClose);
+          });
+        }
+      };
+
+      if (firstChunk && firstChunk.byteLength > 0) {
+        await writeChunkWithBackpressure(firstChunk);
       }
 
-      const reader = upstream.body.getReader();
-      let closed = false;
-      req.on('close', () => {
-        closed = true;
-        reader.cancel().catch(() => {});
-      });
-
-      while (!closed) {
+      while (!closed && !firstRead.done) {
         const { done, value } = await reader.read();
         if (done || closed) break;
-        if (value && !res.writableEnded) {
-          const canContinue = res.write(Buffer.from(value));
-          if (!canContinue && !closed) {
-            await new Promise<void>((resolve) => {
-              const onDrain = () => {
-                res.off('close', onClose);
-                resolve();
-              };
-              const onClose = () => {
-                res.off('drain', onDrain);
-                resolve();
-              };
-              res.once('drain', onDrain);
-              res.once('close', onClose);
-            });
-          }
+        if (value) {
+          await writeChunkWithBackpressure(value);
         }
       }
       if (!res.writableEnded) {
@@ -765,8 +1689,25 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  // Serve PDF.js static fonts, CMaps, WASM, and worker directly so SPA fallback never returns HTML for binary assets
+  const publicPdfjsDir = path.resolve(process.cwd(), 'public/pdfjs');
+  if (fs.existsSync(publicPdfjsDir)) {
+    app.use(
+      '/pdfjs',
+      express.static(publicPdfjsDir, { maxAge: '1h' }),
+      (_req, res) => {
+        res.status(404).end();
+      }
+    );
+  }
+
   // Vite Dev Middleware or Static Production Serve
   if (process.env.NODE_ENV !== 'production') {
+    const publicDir = path.resolve(process.cwd(), 'public');
+    app.get('/pdf.worker.min.mjs', (_req, res) => {
+      res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+      res.sendFile(path.join(publicDir, 'pdf.worker.min.mjs'));
+    });
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

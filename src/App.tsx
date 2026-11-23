@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getRedirectResult,
   onAuthStateChanged,
@@ -73,6 +73,66 @@ import { PWAInstallButton } from './components/PWAInstallButton';
 
 type ActiveTab = 'subjects' | 'downloads' | 'profile';
 
+interface ActiveVideoState {
+  item: ClassItem;
+  subjectId: string;
+  sectionId: string;
+  sectionTitle: string;
+  classNumber: number;
+}
+
+interface ActivePdfState {
+  itemId: string;
+  title: string;
+  pdfUrl: string;
+}
+
+interface NavState {
+  activeTab: ActiveTab;
+  subjectId: string | null;
+  downloadSubjectId: string | null;
+  vaultOpen: boolean;
+  vaultSubjectId: string | null;
+  inboxOpen: boolean;
+  notifOpen: boolean;
+  reportModalOpen: boolean;
+  offlineModalOpen: boolean;
+  activeVideo: ActiveVideoState | null;
+  activePdf: ActivePdfState | null;
+}
+
+const ROOT_NAV: NavState = {
+  activeTab: 'subjects',
+  subjectId: null,
+  downloadSubjectId: null,
+  vaultOpen: false,
+  vaultSubjectId: null,
+  inboxOpen: false,
+  notifOpen: false,
+  reportModalOpen: false,
+  offlineModalOpen: false,
+  activeVideo: null,
+  activePdf: null,
+};
+
+function isSameNav(a: NavState, b: NavState): boolean {
+  return (
+    a.activeTab === b.activeTab &&
+    a.subjectId === b.subjectId &&
+    a.downloadSubjectId === b.downloadSubjectId &&
+    a.vaultOpen === b.vaultOpen &&
+    a.vaultSubjectId === b.vaultSubjectId &&
+    a.inboxOpen === b.inboxOpen &&
+    a.notifOpen === b.notifOpen &&
+    a.reportModalOpen === b.reportModalOpen &&
+    a.offlineModalOpen === b.offlineModalOpen &&
+    a.activeVideo?.item.id === b.activeVideo?.item.id &&
+    Boolean(a.activeVideo) === Boolean(b.activeVideo) &&
+    a.activePdf?.itemId === b.activePdf?.itemId &&
+    Boolean(a.activePdf) === Boolean(b.activePdf)
+  );
+}
+
 const CACHE_USER_KEY = 'noor_elahi_cache_user_v1';
 const EXPLICIT_LOGOUT_KEY = 'noor_elahi_explicit_logout_v1';
 const CACHE_SUBJECTS_KEY = 'noor_elahi_cache_subjects_v1';
@@ -132,7 +192,25 @@ function AppContent() {
   const [authError, setAuthError] = useState('');
   const [unauthorizedDomain, setUnauthorizedDomain] = useState('');
 
-  const [activeTab, setActiveTab] = useState<ActiveTab>('subjects');
+  const [nav, setNav] = useState<NavState>(ROOT_NAV);
+  const navRef = useRef<NavState>(ROOT_NAV);
+  navRef.current = nav;
+  const historySeqRef = useRef<number>(0);
+
+  const {
+    activeTab,
+    subjectId: selectedSubjectId,
+    downloadSubjectId: selectedDownloadSubjectId,
+    vaultOpen,
+    vaultSubjectId,
+    inboxOpen,
+    notifOpen,
+    reportModalOpen,
+    offlineModalOpen,
+    activeVideo,
+    activePdf,
+  } = nav;
+
   const [subjects, setSubjects] = useState<Record<string, SubjectDoc>>(() =>
     readLocalCache<Record<string, SubjectDoc>>(CACHE_SUBJECTS_KEY, {})
   );
@@ -151,35 +229,109 @@ function AppContent() {
   const [vaultHash, setVaultHash] = useState<string | null>(null);
   const [firestoreInbox, setFirestoreInbox] = useState<InboxMessage[]>([]);
   const [serverInbox, setServerInbox] = useState<InboxMessage[]>([]);
-  const [vaultOpen, setVaultOpen] = useState(false);
-  const [inboxOpen, setInboxOpen] = useState(false);
 
-  // Active modals & alerts
-  const [notifOpen, setNotifOpen] = useState(false);
+  // Notifications badge & banner
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
   const [topBanner, setTopBanner] = useState<string | null>(null);
-  const [offlineModalOpen, setOfflineModalOpen] = useState(false);
 
-  // Player & PDF viewer state
-  const [activeVideo, setActiveVideo] = useState<{
-    item: ClassItem;
-    subjectId: string;
-    sectionId: string;
-    sectionTitle: string;
-    classNumber: number;
-  } | null>(null);
-
-  const [activePdf, setActivePdf] = useState<{
-    itemId: string;
-    title: string;
-    pdfUrl: string;
-  } | null>(null);
-
-  // Report Issue modal (for non-admin students from Profile)
-  const [reportModalOpen, setReportModalOpen] = useState(false);
+  // Report Issue modal inputs
   const [reportText, setReportText] = useState('');
   const [reportSending, setReportSending] = useState(false);
   const [reportFeedback, setReportFeedback] = useState('');
+
+  // Synchronize step-by-step UI state with browser / Android hardware Back button
+  useEffect(() => {
+    try {
+      const existing = window.history.state as { __noorSeq?: number; nav?: NavState } | null;
+      if (existing && typeof existing.__noorSeq === 'number' && existing.nav) {
+        historySeqRef.current = existing.__noorSeq;
+        navRef.current = existing.nav;
+        setNav(existing.nav);
+      } else {
+        historySeqRef.current = 0;
+        window.history.replaceState({ __noorSeq: 0, nav: ROOT_NAV }, '');
+      }
+    } catch {
+      // Ignore history API errors
+    }
+
+    const handlePopState = (event: PopStateEvent) => {
+      const st = event.state as { __noorSeq?: number; nav?: NavState } | null;
+      if (st && typeof st.__noorSeq === 'number' && st.nav) {
+        historySeqRef.current = st.__noorSeq;
+        navRef.current = st.nav;
+        setNav(st.nav);
+      } else {
+        historySeqRef.current = 0;
+        navRef.current = ROOT_NAV;
+        setNav(ROOT_NAV);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const pushNav = useCallback((updater: (prev: NavState) => NavState) => {
+    const prev = navRef.current;
+    const next = updater(prev);
+    if (isSameNav(prev, next)) return;
+
+    const nextSeq = historySeqRef.current + 1;
+    historySeqRef.current = nextSeq;
+    navRef.current = next;
+    setNav(next);
+    try {
+      window.history.pushState({ __noorSeq: nextSeq, nav: next }, '');
+    } catch {
+      // Ignore history push failure
+    }
+  }, []);
+
+  const goBackOr = useCallback((fallbackUpdater: (prev: NavState) => NavState, steps = 1) => {
+    const seqBefore = historySeqRef.current;
+    if (seqBefore >= steps) {
+      try {
+        if (steps === 1) {
+          window.history.back();
+        } else {
+          window.history.go(-steps);
+        }
+        window.setTimeout(() => {
+          if (historySeqRef.current === seqBefore) {
+            const next = fallbackUpdater(navRef.current);
+            navRef.current = next;
+            setNav(next);
+            historySeqRef.current = Math.max(0, seqBefore - steps);
+          }
+        }, 120);
+        return;
+      } catch {
+        // Fall through to local update
+      }
+    }
+    const next = fallbackUpdater(navRef.current);
+    navRef.current = next;
+    setNav(next);
+  }, []);
+
+  const switchTab = useCallback(
+    (tab: ActiveTab) => {
+      pushNav((prev) => {
+        if (prev.activeTab === tab) {
+          if (tab === 'subjects' && prev.subjectId !== null) {
+            return { ...prev, subjectId: null };
+          }
+          if (tab === 'downloads' && prev.downloadSubjectId !== null) {
+            return { ...prev, downloadSubjectId: null };
+          }
+          return prev;
+        }
+        return { ...prev, activeTab: tab };
+      });
+    },
+    [pushNav]
+  );
 
   const showBanner = useCallback((msg: string) => {
     setTopBanner(msg);
@@ -858,7 +1010,14 @@ function AppContent() {
       // Ignore signOut network errors
     } finally {
       setAppUser(null);
-      setActiveTab('subjects');
+      historySeqRef.current = 0;
+      navRef.current = ROOT_NAV;
+      setNav(ROOT_NAV);
+      try {
+        window.history.replaceState({ __noorSeq: 0, nav: ROOT_NAV }, '');
+      } catch {
+        // Ignore history error
+      }
     }
   };
 
@@ -1186,7 +1345,7 @@ function AppContent() {
       setReportText('');
       setReportFeedback('আপনার বার্তাটি অ্যাডমিনের ইনবক্সে পাঠানো হয়েছে!');
       setTimeout(() => {
-        setReportModalOpen(false);
+        goBackOr((p) => ({ ...p, reportModalOpen: false }));
         setReportFeedback('');
       }, 1500);
     } catch {
@@ -1257,7 +1416,7 @@ function AppContent() {
               <button
                 type="button"
                 onClick={() => {
-                  setNotifOpen(true);
+                  pushNav((p) => ({ ...p, notifOpen: true }));
                   setUnreadNotifCount(0);
                 }}
                 className="relative min-w-[40px] min-h-[40px] rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-200 hover:bg-slate-800 transition"
@@ -1274,7 +1433,7 @@ function AppContent() {
               {/* Top-Right Profile Avatar Button */}
               <button
                 type="button"
-                onClick={() => setActiveTab('profile')}
+                onClick={() => switchTab('profile')}
                 className="w-9 h-9 rounded-xl bg-slate-900 border border-emerald-500/40 overflow-hidden flex items-center justify-center shrink-0"
                 aria-label="প্রোফাইল"
               >
@@ -1304,15 +1463,26 @@ function AppContent() {
                   downloads={downloadsMap}
                   downloadTasks={downloadTasks}
                   isOnline={isOnline}
-                  onPlayVideo={(payload) => setActiveVideo(payload)}
+                  selectedSubjectId={selectedSubjectId}
+                  onSelectSubjectId={(sid) => {
+                    if (sid === null) {
+                      goBackOr((p) => ({ ...p, subjectId: null }));
+                    } else {
+                      pushNav((p) => ({ ...p, subjectId: sid }));
+                    }
+                  }}
+                  onPlayVideo={(payload) => pushNav((p) => ({ ...p, activeVideo: payload }))}
                   onOpenPdf={({ item }) =>
-                    setActivePdf({
-                      itemId: item.id,
-                      title: item.name,
-                      pdfUrl: item.pdfUrl,
-                    })
+                    pushNav((p) => ({
+                      ...p,
+                      activePdf: {
+                        itemId: item.id,
+                        title: item.name,
+                        pdfUrl: item.pdfUrl,
+                      },
+                    }))
                   }
-                  onOfflineAlert={() => setOfflineModalOpen(true)}
+                  onOfflineAlert={() => pushNav((p) => ({ ...p, offlineModalOpen: true }))}
                 />
               )}
 
@@ -1323,32 +1493,46 @@ function AppContent() {
                   downloads={downloadsMap}
                   downloadTasks={downloadTasks}
                   isOnline={isOnline}
-                  onOfflineAlert={() => setOfflineModalOpen(true)}
+                  selectedSubjectId={selectedDownloadSubjectId}
+                  onSelectSubjectId={(sid) => {
+                    if (sid === null) {
+                      goBackOr((p) => ({ ...p, downloadSubjectId: null }));
+                    } else {
+                      pushNav((p) => ({ ...p, downloadSubjectId: sid }));
+                    }
+                  }}
+                  onOfflineAlert={() => pushNav((p) => ({ ...p, offlineModalOpen: true }))}
                   onPlayDownloaded={(rec) => {
                     const secTitle =
                       rec.sectionTitle ||
                       SUBJECT_LIST.find((s) => s.id === rec.subjectId)?.name ||
                       'ক্লাস';
-                    setActiveVideo({
-                      item: {
-                        id: rec.itemId,
-                        name: rec.videoName,
-                        videoUrl: rec.videoUrl,
-                        pdfUrl: rec.pdfUrl,
-                        createdAt: Date.now(),
+                    pushNav((p) => ({
+                      ...p,
+                      activeVideo: {
+                        item: {
+                          id: rec.itemId,
+                          name: rec.videoName,
+                          videoUrl: rec.videoUrl,
+                          pdfUrl: rec.pdfUrl,
+                          createdAt: Date.now(),
+                        },
+                        subjectId: rec.subjectId,
+                        sectionId: rec.sectionId,
+                        sectionTitle: secTitle,
+                        classNumber: rec.classNumber,
                       },
-                      subjectId: rec.subjectId,
-                      sectionId: rec.sectionId,
-                      sectionTitle: secTitle,
-                      classNumber: rec.classNumber,
-                    });
+                    }));
                   }}
                   onOpenDownloadedPdf={(rec) =>
-                    setActivePdf({
-                      itemId: rec.itemId,
-                      title: rec.videoName,
-                      pdfUrl: rec.pdfUrl,
-                    })
+                    pushNav((p) => ({
+                      ...p,
+                      activePdf: {
+                        itemId: rec.itemId,
+                        title: rec.videoName,
+                        pdfUrl: rec.pdfUrl,
+                      },
+                    }))
                   }
                   onDeleteDownload={handleDeleteDownload}
                   onRestoreMatchedRecords={handleRestoreMatchedRecords}
@@ -1360,9 +1544,11 @@ function AppContent() {
                   user={appUser}
                   inboxCount={combinedInbox.length}
                   onUpdateProfile={handleUpdateProfile}
-                  onOpenFileVault={() => setVaultOpen(true)}
-                  onOpenAdminInbox={() => setInboxOpen(true)}
-                  onOpenReportModal={() => setReportModalOpen(true)}
+                  onOpenFileVault={() =>
+                    pushNav((p) => ({ ...p, vaultOpen: true, vaultSubjectId: null }))
+                  }
+                  onOpenAdminInbox={() => pushNav((p) => ({ ...p, inboxOpen: true }))}
+                  onOpenReportModal={() => pushNav((p) => ({ ...p, reportModalOpen: true }))}
                   onLogout={handleLogout}
                 />
               )}
@@ -1374,7 +1560,7 @@ function AppContent() {
             <div className="max-w-xl mx-auto grid grid-cols-3 gap-2 px-3 py-1.5 h-16">
               <button
                 type="button"
-                onClick={() => setActiveTab('subjects')}
+                onClick={() => switchTab('subjects')}
                 className={`rounded-2xl flex flex-col items-center justify-center gap-1 transition ${
                   activeTab === 'subjects'
                     ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold'
@@ -1387,7 +1573,7 @@ function AppContent() {
 
               <button
                 type="button"
-                onClick={() => setActiveTab('downloads')}
+                onClick={() => switchTab('downloads')}
                 className={`rounded-2xl flex flex-col items-center justify-center gap-1 transition ${
                   activeTab === 'downloads'
                     ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold'
@@ -1400,7 +1586,7 @@ function AppContent() {
 
               <button
                 type="button"
-                onClick={() => setActiveTab('profile')}
+                onClick={() => switchTab('profile')}
                 className={`rounded-2xl flex flex-col items-center justify-center gap-1 transition ${
                   activeTab === 'profile'
                     ? 'bg-sky-500/15 border border-sky-500/30 text-sky-400 font-bold'
@@ -1432,17 +1618,20 @@ function AppContent() {
               onSaveProgress={handleSaveProgress}
               onOpenPdf={() => {
                 if (!isOnline && !downloadsMap[activeVideo.item.id]) {
-                  setOfflineModalOpen(true);
+                  pushNav((p) => ({ ...p, offlineModalOpen: true }));
                   return;
                 }
-                setActivePdf({
-                  itemId: activeVideo.item.id,
-                  title: activeVideo.item.name,
-                  pdfUrl: activeVideo.item.pdfUrl,
-                });
+                pushNav((p) => ({
+                  ...p,
+                  activePdf: {
+                    itemId: activeVideo.item.id,
+                    title: activeVideo.item.name,
+                    pdfUrl: activeVideo.item.pdfUrl,
+                  },
+                }));
               }}
-              onOfflineAttempt={() => setOfflineModalOpen(true)}
-              onClose={() => setActiveVideo(null)}
+              onOfflineAttempt={() => pushNav((p) => ({ ...p, offlineModalOpen: true }))}
+              onClose={() => goBackOr((p) => ({ ...p, activeVideo: null }))}
             />
           )}
 
@@ -1450,7 +1639,7 @@ function AppContent() {
           {activePdf && (
             <PdfViewerModal
               isOpen={Boolean(activePdf)}
-              onClose={() => setActivePdf(null)}
+              onClose={() => goBackOr((p) => ({ ...p, activePdf: null }))}
               title={activePdf.title}
               itemId={activePdf.itemId}
               pdfUrl={activePdf.pdfUrl}
@@ -1462,16 +1651,27 @@ function AppContent() {
             <>
               <FileVaultModal
                 isOpen={vaultOpen}
-                onClose={() => setVaultOpen(false)}
+                onClose={() => {
+                  const steps = navRef.current.vaultSubjectId ? 2 : 1;
+                  goBackOr((p) => ({ ...p, vaultOpen: false, vaultSubjectId: null }), steps);
+                }}
                 subjects={subjects}
                 storedVaultHash={vaultHash}
+                selectedSubjectId={vaultSubjectId}
+                onSelectSubjectId={(sid) => {
+                  if (sid === null) {
+                    goBackOr((p) => ({ ...p, vaultSubjectId: null }));
+                  } else {
+                    pushNav((p) => ({ ...p, vaultSubjectId: sid }));
+                  }
+                }}
                 onSaveVaultPasswordHash={handleSaveVaultPasswordHash}
                 onSaveSubject={handleSaveSubject}
               />
 
               <AdminInboxModal
                 isOpen={inboxOpen}
-                onClose={() => setInboxOpen(false)}
+                onClose={() => goBackOr((p) => ({ ...p, inboxOpen: false }))}
                 messages={combinedInbox}
                 onDeleteMessage={handleDeleteInboxMessage}
               />
@@ -1486,13 +1686,13 @@ function AppContent() {
                   <h3 className="text-base font-bold text-white">নোটিফিকেশন</h3>
                   <button
                     type="button"
-                    onClick={() => setNotifOpen(false)}
+                    onClick={() => goBackOr((p) => ({ ...p, notifOpen: false }))}
                     className="p-1.5 rounded-xl bg-slate-800 text-slate-300"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
                   {notifications.length === 0 ? (
                     <p className="text-center text-xs text-slate-400 py-8">
                       এখনও কোনো নোটিফিকেশন আসেনি।
@@ -1528,7 +1728,7 @@ function AppContent() {
                 </p>
                 <button
                   type="button"
-                  onClick={() => setOfflineModalOpen(false)}
+                  onClick={() => goBackOr((p) => ({ ...p, offlineModalOpen: false }))}
                   className="w-full py-2.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-sm"
                 >
                   ঠিক আছে
@@ -1539,7 +1739,7 @@ function AppContent() {
         </div>
       )}
 
-      {/* Report Issue to Admin Modal (Accessible from Auth Screen & Profile) */}
+      {/* Report Issue to Admin Modal (Accessible from Profile) */}
       {reportModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
           <form
@@ -1552,7 +1752,7 @@ function AppContent() {
               </h3>
               <button
                 type="button"
-                onClick={() => setReportModalOpen(false)}
+                onClick={() => goBackOr((p) => ({ ...p, reportModalOpen: false }))}
                 className="p-1.5 rounded-xl bg-slate-800 text-slate-300"
               >
                 <X className="w-4 h-4" />

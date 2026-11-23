@@ -1,7 +1,9 @@
 import { DownloadRecord, DownloadTask } from '../types';
 import {
+  extractGoogleDriveFileId,
   isHlsUrl,
   isUnsupportedVideoHost,
+  normalizeMediaUrl,
   resolveDownloadProxyUrl,
   sanitizeBaseFilename,
   saveOfflineMedia,
@@ -26,17 +28,45 @@ type CompleteListener = (record: DownloadRecord) => void;
 
 const MAX_CONCURRENT = 3;
 
-async function readProxyErrorMessage(res: Response, fallback: string): Promise<string> {
+async function readProxyErrorMessage(res: Response, fallback: string, sourceUrl?: string): Promise<string> {
   try {
-    const ct = res.headers.get('content-type') || '';
-    if (ct.includes('application/json')) {
-      const data = (await res.json()) as { error?: string };
-      if (data?.error) return data.error;
+    const txt = await res.text();
+    if (txt) {
+      try {
+        const data = JSON.parse(txt) as { error?: string };
+        if (data?.error) return data.error;
+      } catch {
+        // Not JSON
+      }
     }
   } catch {
-    // Ignore parse error
+    // Ignore read error
+  }
+  if (res.status === 403 && sourceUrl && extractGoogleDriveFileId(sourceUrl)) {
+    return 'এই Google Drive ফাইলটি প্রাইভেট (Restricted) করা আছে। Drive-এ গিয়ে "Anyone with the link" চালু করুন।';
   }
   return fallback;
+}
+
+async function blobHasPdfHeader(blob: Blob): Promise<boolean> {
+  try {
+    const slice = blob.slice(0, Math.min(1024, blob.size));
+    const bytes = new Uint8Array(await slice.arrayBuffer());
+    for (let i = 0; i <= bytes.length - 5; i++) {
+      if (
+        bytes[i] === 0x25 &&
+        bytes[i + 1] === 0x50 &&
+        bytes[i + 2] === 0x44 &&
+        bytes[i + 3] === 0x46 &&
+        bytes[i + 4] === 0x2d
+      ) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 class DownloadManager {
@@ -287,110 +317,154 @@ class DownloadManager {
     try {
       // Validate video link format before fetching
       if (!state.videoDone && state.task.videoUrl) {
-        if (isUnsupportedVideoHost(state.task.videoUrl)) {
-          throw new Error('YouTube/Vimeo লিংক সরাসরি ডাউনলোড করা যায় না; Google Drive বা MP4 লিংক ব্যবহার করুন।');
-        }
-        if (isHlsUrl(state.task.videoUrl)) {
-          throw new Error('HLS (.m3u8) স্ট্রিম ডাউনলোড সমর্থিত নয়; Google Drive বা MP4 লিংক ব্যবহার করুন।');
-        }
-
-        const proxyVideoUrl = resolveDownloadProxyUrl(state.task.videoUrl, `${baseName}.mp4`);
-        const headers: Record<string, string> = {};
-        if (state.videoDownloaded > 0) {
-          headers['Range'] = `bytes=${state.videoDownloaded}-`;
-        }
-
-        const res = await fetch(proxyVideoUrl, {
-          headers,
-          signal: controller.signal,
-        });
-
-        if (!res.ok && res.status !== 206) {
-          const serverMsg = await readProxyErrorMessage(
-            res,
-            `ভিডিও ডাউনলোড ব্যর্থ হয়েছে (${res.status})`
-          );
-          throw new Error(serverMsg);
-        }
-
-        const ct = (res.headers.get('content-type') || '').toLowerCase();
-        if (ct.includes('text/html')) {
-          throw new Error('ভিডিও লিংকটি সরাসরি ডাউনলোডযোগ্য নয় (Drive এ পাবলিক এক্সেস দিন)।');
-        }
-
-        // If server ignored Range and returned 200, reset offset
-        if (res.status === 200 && state.videoDownloaded > 0) {
-          state.videoChunks = [];
-          state.videoDownloaded = 0;
-        }
-
-        const contentLenHeader = res.headers.get('content-length');
-        const contentRangeHeader = res.headers.get('content-range');
-        if (contentRangeHeader) {
-          const totalMatch = contentRangeHeader.match(/\/(\d+)$/);
-          if (totalMatch?.[1]) state.videoTotal = Number(totalMatch[1]);
-        } else if (contentLenHeader) {
-          state.videoTotal = state.videoDownloaded + Number(contentLenHeader);
-        }
-
-        state.task.totalBytes = state.videoTotal || state.task.totalBytes;
-        this.emit(true);
-
-        if (res.body) {
-          const reader = res.body.getReader();
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value) {
-              state.videoChunks.push(value);
-              state.videoDownloaded += value.byteLength;
-              state.task.downloadedBytes = state.videoDownloaded;
-              if (state.videoTotal > 0) {
-                const videoRatio = Math.min(1, state.videoDownloaded / state.videoTotal);
-                state.task.progress = state.task.pdfUrl
-                  ? Math.round(videoRatio * 90)
-                  : Math.round(videoRatio * 100);
-              } else {
-                state.task.progress = Math.min(88, Math.max(5, state.task.progress + 1));
-              }
-              this.emit(false);
-            }
+        if (isUnsupportedVideoHost(state.task.videoUrl) || isHlsUrl(state.task.videoUrl)) {
+          if (state.task.pdfUrl) {
+            // Class has YouTube/HLS video plus downloadable PDF: skip video cleanly and download PDF
+            state.videoDone = true;
+          } else if (isUnsupportedVideoHost(state.task.videoUrl)) {
+            throw new Error('YouTube/Vimeo লিংক সরাসরি ডাউনলোড করা যায় না; Google Drive বা MP4 লিংক ব্যবহার করুন।');
+          } else {
+            throw new Error('HLS (.m3u8) স্ট্রিম ডাউনলোড সমর্থিত নয়; Google Drive বা MP4 লিংক ব্যবহার করুন।');
           }
         } else {
-          const buf = new Uint8Array(await res.arrayBuffer());
-          state.videoChunks.push(buf);
-          state.videoDownloaded = buf.byteLength;
-          state.task.downloadedBytes = buf.byteLength;
-          state.task.totalBytes = buf.byteLength;
-          state.task.progress = state.task.pdfUrl ? 90 : 100;
+          const proxyVideoUrl = resolveDownloadProxyUrl(state.task.videoUrl, `${baseName}.mp4`, 'video');
+          const headers: Record<string, string> = {};
+          if (state.videoDownloaded > 0) {
+            headers['Range'] = `bytes=${state.videoDownloaded}-`;
+          }
+
+          const res = await fetch(proxyVideoUrl, {
+            headers,
+            signal: controller.signal,
+          });
+
+          if (!res.ok && res.status !== 206) {
+            const serverMsg = await readProxyErrorMessage(
+              res,
+              `ভিডিও ডাউনলোড ব্যর্থ হয়েছে (${res.status})`,
+              state.task.videoUrl
+            );
+            throw new Error(serverMsg);
+          }
+
+          const ct = (res.headers.get('content-type') || '').toLowerCase();
+          if (ct.includes('text/html')) {
+            throw new Error('ভিডিও লিংকটি সরাসরি ডাউনলোডযোগ্য নয় (Drive এ পাবলিক এক্সেস দিন)।');
+          }
+
+          // If server ignored Range and returned 200, reset offset
+          if (res.status === 200 && state.videoDownloaded > 0) {
+            state.videoChunks = [];
+            state.videoDownloaded = 0;
+          }
+
+          const contentLenHeader = res.headers.get('content-length');
+          const contentRangeHeader = res.headers.get('content-range');
+          if (contentRangeHeader) {
+            const totalMatch = contentRangeHeader.match(/\/(\d+)$/);
+            if (totalMatch?.[1]) state.videoTotal = Number(totalMatch[1]);
+          } else if (contentLenHeader) {
+            state.videoTotal = state.videoDownloaded + Number(contentLenHeader);
+          }
+
+          state.task.totalBytes = state.videoTotal || state.task.totalBytes;
+          this.emit(true);
+
+          if (res.body) {
+            const reader = res.body.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value) {
+                state.videoChunks.push(value);
+                state.videoDownloaded += value.byteLength;
+                state.task.downloadedBytes = state.videoDownloaded;
+                if (state.videoTotal > 0) {
+                  const videoRatio = Math.min(1, state.videoDownloaded / state.videoTotal);
+                  state.task.progress = state.task.pdfUrl
+                    ? Math.round(videoRatio * 90)
+                    : Math.round(videoRatio * 100);
+                } else {
+                  state.task.progress = Math.min(88, Math.max(5, state.task.progress + 1));
+                }
+                this.emit(false);
+              }
+            }
+          } else {
+            const buf = new Uint8Array(await res.arrayBuffer());
+            state.videoChunks.push(buf);
+            state.videoDownloaded = buf.byteLength;
+            state.task.downloadedBytes = buf.byteLength;
+            state.task.totalBytes = buf.byteLength;
+            state.task.progress = state.task.pdfUrl ? 90 : 100;
+          }
+          state.videoDone = true;
+          this.emit(true);
         }
-        state.videoDone = true;
-        this.emit(true);
       }
 
-      // 2. Download PDF alongside Video
+      // 2. Download PDF alongside Video (with direct CORS fallback & %PDF- validation)
       if (!state.pdfDone && state.task.pdfUrl) {
-        const proxyPdfUrl = resolveDownloadProxyUrl(state.task.pdfUrl, `${baseName}.pdf`);
-        const pdfRes = await fetch(proxyPdfUrl, { signal: controller.signal });
-        if (!pdfRes.ok) {
-          const serverMsg = await readProxyErrorMessage(
-            pdfRes,
-            `PDF ডাউনলোড ব্যর্থ হয়েছে (${pdfRes.status})`
-          );
-          throw new Error(serverMsg);
+        const hasVideoAlready = state.videoChunks.length > 0;
+        let fetchedPdfBlob: Blob | undefined;
+        let pdfFailureReason = '';
+
+        try {
+          const proxyPdfUrl = resolveDownloadProxyUrl(state.task.pdfUrl, `${baseName}.pdf`, 'pdf');
+          const pdfRes = await fetch(proxyPdfUrl, { signal: controller.signal });
+          if (pdfRes.ok) {
+            const pdfCt = (pdfRes.headers.get('content-type') || '').toLowerCase();
+            if (!pdfCt.includes('text/html') && !pdfCt.includes('application/json')) {
+              const candidate = await pdfRes.blob();
+              if (candidate.size > 0 && (await blobHasPdfHeader(candidate))) {
+                fetchedPdfBlob = candidate;
+              } else {
+                pdfFailureReason = 'PDF ফাইলটি সঠিক ফরম্যাটে পাওয়া যায়নি।';
+              }
+            } else {
+              pdfFailureReason = 'PDF লিংকটি সরাসরি ডাউনলোডযোগ্য নয় (Drive এ পাবলিক এক্সেস দিন)।';
+            }
+          } else {
+            pdfFailureReason = await readProxyErrorMessage(
+              pdfRes,
+              `PDF ডাউনলোড ব্যর্থ হয়েছে (${pdfRes.status})`,
+              state.task.pdfUrl
+            );
+          }
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') throw err;
+          pdfFailureReason = err instanceof Error ? err.message : 'PDF ডাউনলোড ব্যর্থ হয়েছে।';
         }
-        const pdfCt = (pdfRes.headers.get('content-type') || '').toLowerCase();
-        if (pdfCt.includes('text/html')) {
-          throw new Error('PDF লিংকটি সরাসরি ডাউনলোডযোগ্য নয় (Drive এ পাবলিক এক্সেস দিন)।');
+
+        // Direct CORS fallback if proxy failed
+        if (!fetchedPdfBlob) {
+          const normalizedPdf = normalizeMediaUrl(state.task.pdfUrl);
+          if (/^https?:\/\//i.test(normalizedPdf)) {
+            try {
+              const directRes = await fetch(normalizedPdf, { signal: controller.signal });
+              if (directRes.ok) {
+                const candidate = await directRes.blob();
+                if (candidate.size > 0 && (await blobHasPdfHeader(candidate))) {
+                  fetchedPdfBlob = candidate;
+                }
+              }
+            } catch {
+              // Keep earlier pdfFailureReason
+            }
+          }
         }
-        const pdfBlob = await pdfRes.blob();
-        if (pdfBlob.size === 0) {
-          throw new Error('PDF ফাইলটি খালি পাওয়া গেছে।');
+
+        if (fetchedPdfBlob) {
+          state.pdfBlob = fetchedPdfBlob;
+          state.task.downloadedBytes += fetchedPdfBlob.size;
+          state.task.totalBytes = Math.max(state.task.totalBytes, state.task.downloadedBytes);
+          state.pdfDone = true;
+        } else if (!hasVideoAlready) {
+          throw new Error(pdfFailureReason || 'PDF ডাউনলোড করা যায়নি।');
+        } else {
+          // Video succeeded while PDF was private/unavailable: keep the downloaded video intact!
+          state.pdfDone = true;
         }
-        state.pdfBlob = pdfBlob;
-        state.task.downloadedBytes += pdfBlob.size;
-        state.task.totalBytes = Math.max(state.task.totalBytes, state.task.downloadedBytes);
-        state.pdfDone = true;
       }
 
       const combinedVideoBlob =
