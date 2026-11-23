@@ -1,22 +1,15 @@
-const CACHE_NAME = 'noor-elahi-v10';
-const FONT_CACHE = 'noor-elahi-fonts-v10';
+const CACHE_NAME = 'noor-elahi-v11';
+const FONT_CACHE = 'noor-elahi-fonts-v11';
 
 const CORE_SHELL_ASSETS = [
   '/',
   '/index.html',
-  '/manifest.json',
   '/manifest.json?v=5',
-  '/icon-192.png',
   '/icon-192.png?v=5',
-  '/icon-512.png',
   '/icon-512.png?v=5',
-  '/maskable-icon-512.png',
   '/maskable-icon-512.png?v=5',
-  '/apple-touch-icon.png',
   '/apple-touch-icon.png?v=5',
-  '/favicon.svg',
   '/favicon.svg?v=5',
-  '/icon.svg',
   '/icon.svg?v=5',
   '/plyr.svg',
   '/pdf.worker.min.mjs',
@@ -158,11 +151,14 @@ self.addEventListener('message', (event) => {
   }
 });
 
-async function fetchWithTimeout(request, timeoutMs) {
+async function fetchWithTimeout(request, timeoutMs, bypassHttpCache = false) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(request, { signal: controller.signal });
+    return await fetch(request, {
+      signal: controller.signal,
+      ...(bypassHttpCache ? { cache: 'no-store' } : {}),
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -238,7 +234,7 @@ self.addEventListener('fetch', (event) => {
 
   if (url.origin !== self.location.origin) return;
 
-  // Navigation requests (HTML shell)
+  // Navigation requests (HTML shell): NetworkFirst with no-store + generous timeout so installed PWAs never stay on old shells
   if (request.mode === 'navigate') {
     event.respondWith(
       (async () => {
@@ -249,7 +245,7 @@ self.addEventListener('fetch', (event) => {
           (await cache.match('/')) ||
           (await cache.match('/index.html'));
         try {
-          const netRes = await fetchWithTimeout(request, cachedNav ? 1800 : 12000);
+          const netRes = await fetchWithTimeout(request, cachedNav ? 6000 : 14000, true);
           if (netRes && netRes.ok) {
             const ct = (netRes.headers.get('content-type') || '').toLowerCase();
             if (ct.includes('text/html')) {
@@ -283,8 +279,7 @@ self.addEventListener('fetch', (event) => {
         url.pathname.startsWith('/apple-touch-icon') ||
         url.pathname === '/plyr.svg' ||
         url.pathname === '/pdf.worker.min.mjs' ||
-        url.pathname === '/favicon.svg' ||
-        url.pathname === '/manifest.json';
+        url.pathname === '/favicon.svg';
 
       if (isImmutableOrStatic && exactCached) {
         fetch(request)
@@ -298,7 +293,7 @@ self.addEventListener('fetch', (event) => {
       }
 
       try {
-        const netRes = await fetchWithTimeout(request, exactCached ? 2000 : 15000);
+        const netRes = await fetchWithTimeout(request, exactCached ? 6000 : 15000, true);
         if (netRes && netRes.ok) {
           await cache.put(request, netRes.clone());
         }

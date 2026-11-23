@@ -136,30 +136,42 @@ function warmServiceWorkerCache(sw: ServiceWorker | null | undefined) {
 }
 
 if ('serviceWorker' in navigator) {
-  const bootTime = Date.now();
   const hadController = Boolean(navigator.serviceWorker.controller);
 
   window.addEventListener('load', () => {
     navigator.serviceWorker
-      .register('/sw.js', { scope: '/' })
+      .register('/sw.js', { scope: '/', updateViaCache: 'none' })
       .then((reg) => {
         if (reg.active) {
           warmServiceWorkerCache(reg.active);
         }
+        if (reg.waiting) {
+          reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+        }
         reg.update().catch(() => {});
 
         let lastUpdateCheck = Date.now();
-        document.addEventListener('visibilitychange', () => {
-          if (document.visibilityState === 'visible' && navigator.onLine && Date.now() - lastUpdateCheck > 60_000) {
+        const triggerUpdateCheck = () => {
+          if (navigator.onLine && Date.now() - lastUpdateCheck > 15_000) {
             lastUpdateCheck = Date.now();
             reg.update().catch(() => {});
           }
+        };
+
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') {
+            triggerUpdateCheck();
+          }
         });
+        window.addEventListener('online', triggerUpdateCheck);
 
         reg.addEventListener('updatefound', () => {
           const installing = reg.installing;
           if (!installing) return;
           installing.addEventListener('statechange', () => {
+            if (installing.state === 'installed' && navigator.serviceWorker.controller) {
+              installing.postMessage({ type: 'SKIP_WAITING' });
+            }
             if (installing.state === 'activated') {
               warmServiceWorkerCache(installing);
             }
@@ -172,9 +184,18 @@ if ('serviceWorker' in navigator) {
       })
       .catch(() => {});
 
+    let pendingReload = false;
+    const performSafeReload = () => {
+      const lastReloadAt = Number(sessionStorage.getItem('noor_elahi_sw_reloaded_at') || '0');
+      if (Date.now() - lastReloadAt < 8_000) return;
+      sessionStorage.setItem('noor_elahi_sw_reloaded_at', String(Date.now()));
+      window.location.reload();
+    };
+
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       warmServiceWorkerCache(navigator.serviceWorker.controller);
-      // Seamlessly apply updated app shell when an existing PWA updates to a newer version
+      if (!hadController) return;
+
       const isPlayingVideo = Array.from(document.querySelectorAll('video')).some(
         (v) => !v.paused && !v.ended
       );
@@ -182,16 +203,22 @@ if ('serviceWorker' in navigator) {
         /[?&#](code|state|apiKey|mode|oobCode|__firebase)=/i.test(
           window.location.search + window.location.hash
         );
-      const reloadedOnce = sessionStorage.getItem('noor_elahi_sw_reloaded') === '1';
-      if (
-        hadController &&
-        !reloadedOnce &&
-        !isPlayingVideo &&
-        !isOAuthCallback &&
-        Date.now() - bootTime < 20_000
-      ) {
-        sessionStorage.setItem('noor_elahi_sw_reloaded', '1');
-        window.location.reload();
+      if (isPlayingVideo || isOAuthCallback) {
+        pendingReload = true;
+        return;
+      }
+      performSafeReload();
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (pendingReload && document.visibilityState === 'visible') {
+        const isPlayingVideo = Array.from(document.querySelectorAll('video')).some(
+          (v) => !v.paused && !v.ended
+        );
+        if (!isPlayingVideo) {
+          pendingReload = false;
+          performSafeReload();
+        }
       }
     });
   });

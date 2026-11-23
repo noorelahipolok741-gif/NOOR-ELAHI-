@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ChevronRight,
+  Eye,
+  EyeOff,
   Lock,
   Plus,
   Save,
@@ -17,8 +19,10 @@ interface FileVaultModalProps {
   onClose: () => void;
   subjects: Record<string, SubjectDoc>;
   storedVaultHash: string | null;
+  isOnline: boolean;
   selectedSubjectId?: string | null;
   onSelectSubjectId?: (subjectId: string | null) => void;
+  onCacheVaultHash?: (hash: string) => void;
   onSaveVaultPasswordHash: (hash: string) => Promise<void>;
   onSaveSubject: (
     subject: SubjectDoc,
@@ -35,13 +39,16 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
   onClose,
   subjects,
   storedVaultHash,
+  isOnline,
   selectedSubjectId: controlledSubjectId,
   onSelectSubjectId,
+  onCacheVaultHash,
   onSaveVaultPasswordHash,
   onSaveSubject,
 }) => {
   const [unlocked, setUnlocked] = useState(false);
   const [passInput, setPassInput] = useState('');
+  const [showPass, setShowPass] = useState(false);
   const [passError, setPassError] = useState('');
   const [savingPass, setSavingPass] = useState(false);
 
@@ -60,6 +67,16 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
   const [draftSections, setDraftSections] = useState<SubjectSection[]>([]);
   const [savingSubject, setSavingSubject] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
+  const [saveIsError, setSaveIsError] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setPassError('');
+      setPassInput('');
+      setSaveMessage('');
+      setSaveIsError(false);
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen || !editingSubjectId) return;
@@ -71,6 +88,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
         : []
     );
     setSaveMessage('');
+    setSaveIsError(false);
   }, [isOpen, editingSubjectId]);
 
   if (!isOpen) return null;
@@ -87,36 +105,97 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
     try {
       const hash = await sha256Hex(clean);
       if (storedVaultHash && hash === storedVaultHash) {
+        onCacheVaultHash?.(hash);
         setUnlocked(true);
         setPassInput('');
         return;
       }
 
-      // Verify against server-side configured admin vault password
-      const idToken = await auth.currentUser?.getIdToken();
-      if (idToken) {
-        const res = await fetch('/api/vault/verify', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({ password: clean }),
-        });
-        const data = (await res.json()) as { ok?: boolean };
-        if (res.ok && data.ok) {
-          if (!storedVaultHash) {
-            await onSaveVaultPasswordHash(hash).catch(() => {});
-          }
-          setUnlocked(true);
-          setPassInput('');
-          return;
+      // Wait for Firebase Auth hydration in standalone PWA cold launches
+      const authWithReady = auth as unknown as { authStateReady?: () => Promise<void> };
+      if (typeof authWithReady.authStateReady === 'function') {
+        await Promise.race([
+          authWithReady.authStateReady().catch(() => {}),
+          new Promise<void>((r) => window.setTimeout(r, 2500)),
+        ]);
+      }
+
+      const onlineNow = isOnline && (typeof navigator === 'undefined' || navigator.onLine);
+      if (!onlineNow) {
+        setPassError(
+          storedVaultHash
+            ? 'ভুল File Vault পাসওয়ার্ড।'
+            : 'অফলাইনে প্রথমবার File Vault খুলতে একবার ইন্টারনেট চালু অবস্থায় পাসওয়ার্ড যাচাই করুন।'
+        );
+        return;
+      }
+
+      let idToken = '';
+      if (auth.currentUser) {
+        try {
+          idToken = await auth.currentUser.getIdToken();
+        } catch {
+          idToken = await auth.currentUser.getIdToken(true).catch(() => '');
         }
+      }
+
+      if (!idToken) {
+        setPassError(
+          'অ্যাডমিন Google সেশন সক্রিয় নেই। প্রোফাইল থেকে সাইন আউট করে পুনরায় "সাইন ইন উইথ গুগল" দিয়ে প্রবেশ করুন।'
+        );
+        return;
+      }
+
+      // Verify against server-side configured admin vault password
+      let res = await fetch('/api/vault/verify', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({ password: clean }),
+      });
+
+      if (res.status === 403 && auth.currentUser) {
+        const refreshedToken = await auth.currentUser.getIdToken(true).catch(() => '');
+        if (refreshedToken && refreshedToken !== idToken) {
+          res = await fetch('/api/vault/verify', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${refreshedToken}`,
+            },
+            body: JSON.stringify({ password: clean }),
+          });
+        }
+      }
+
+      if (res.status === 403) {
+        setPassError(
+          'এই Google অ্যাকাউন্টটি অ্যাডমিন হিসেবে যাচাই করা যায়নি। প্রোফাইল থেকে সাইন আউট করে অ্যাডমিন জিমেইল দিয়ে পুনরায় লগইন করুন।'
+        );
+        return;
+      }
+
+      if (!res.ok) {
+        setPassError('সার্ভার থেকে ভল্ট যাচাই করা যায়নি। কিছুক্ষণ পর আবার চেষ্টা করুন।');
+        return;
+      }
+
+      const data = (await res.json()) as { ok?: boolean };
+      if (data.ok) {
+        onCacheVaultHash?.(hash);
+        if (!storedVaultHash) {
+          onSaveVaultPasswordHash(hash).catch(() => {});
+        }
+        setUnlocked(true);
+        setPassInput('');
+        return;
       }
 
       setPassError('ভুল File Vault পাসওয়ার্ড।');
     } catch {
-      setPassError('ভল্ট আনলক করতে সমস্যা হয়েছে।');
+      setPassError('ভল্ট আনলক করতে সমস্যা হয়েছে। ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।');
     } finally {
       setSavingPass(false);
     }
@@ -270,9 +349,19 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
 
       setDraftSections(normalizedSections);
       await onSaveSubject(nextDoc, addedItems);
-      setSaveMessage('সফলভাবে সেভ এবং আপডেট হয়েছে!');
-    } catch {
-      setSaveMessage('সেভ করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।');
+      setSaveIsError(false);
+      setSaveMessage(
+        isOnline
+          ? 'সফলভাবে সেভ এবং আপডেট হয়েছে!'
+          : 'অফলাইন ক্যাশে সেভ হয়েছে! অনলাইনে এলে স্বয়ংক্রিয়ভাবে সিঙ্ক হবে।'
+      );
+    } catch (err) {
+      setSaveIsError(true);
+      setSaveMessage(
+        err instanceof Error && err.message
+          ? err.message
+          : 'সেভ করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।'
+      );
     } finally {
       setSavingSubject(false);
     }
@@ -303,10 +392,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
 
         <button
           type="button"
-          onClick={() => {
-            setEditingSubjectId(null);
-            onClose();
-          }}
+          onClick={onClose}
           className="px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs font-semibold text-slate-200 hover:bg-slate-800 flex items-center gap-1.5"
         >
           <X className="w-4 h-4" />
@@ -315,10 +401,10 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
       </div>
 
       {!unlocked ? (
-        <div className="flex-1 flex items-center justify-center p-4">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y pwa-scroll-container flex items-center justify-center p-4">
           <form
             onSubmit={handleUnlock}
-            className="w-full max-w-sm rounded-3xl bg-slate-900 border border-slate-800 p-6 space-y-4 shadow-2xl"
+            className="w-full max-w-sm rounded-3xl bg-slate-900 border border-slate-800 p-6 space-y-4 shadow-2xl my-auto"
           >
             <div className="w-12 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center mx-auto">
               <Lock className="w-6 h-6 text-emerald-400" />
@@ -329,25 +415,39 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                 ভেতরে প্রবেশ করতে অ্যাডমিনের ভল্ট পাসওয়ার্ড দিন
               </p>
             </div>
-            <input
-              type="password"
-              value={passInput}
-              onChange={(e) => setPassInput(e.target.value)}
-              placeholder="ভল্ট পাসওয়ার্ড লিখুন"
-              className="w-full h-11 px-4 rounded-xl bg-slate-950 border border-slate-800 focus:border-emerald-500 text-sm text-white outline-none"
-            />
-            {passError && <p className="text-xs text-rose-400">{passError}</p>}
+            <div className="relative">
+              <input
+                type={showPass ? 'text' : 'password'}
+                value={passInput}
+                onChange={(e) => {
+                  setPassInput(e.target.value);
+                  if (passError) setPassError('');
+                }}
+                placeholder="ভল্ট পাসওয়ার্ড লিখুন"
+                autoComplete="current-password"
+                className="w-full h-11 pl-4 pr-11 rounded-xl bg-slate-950 border border-slate-800 focus:border-emerald-500 text-sm text-white outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPass((v) => !v)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-slate-400 hover:text-white"
+                aria-label={showPass ? 'পাসওয়ার্ড লুকান' : 'পাসওয়ার্ড দেখুন'}
+              >
+                {showPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+            {passError && <p className="text-xs text-rose-400 leading-relaxed">{passError}</p>}
             <button
               type="submit"
               disabled={savingPass}
-              className="w-full h-11 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm"
+              className="w-full h-11 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm disabled:opacity-60"
             >
               {savingPass ? 'যাচাই হচ্ছে...' : 'প্রবেশ করুন'}
             </button>
           </form>
         </div>
       ) : !editingSubjectId ? (
-        <div className="flex-1 overflow-y-auto p-4 max-w-4xl w-full mx-auto space-y-3">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y pwa-scroll-container p-4 max-w-4xl w-full mx-auto space-y-3">
           <p className="text-xs text-slate-400 px-1">
             কন্টেন্ট যোগ বা আপডেট করতে যেকোনো একটি বিষয় নির্বাচন করুন:
           </p>
@@ -377,7 +477,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
           </div>
         </div>
       ) : (
-        <div className="flex-1 overflow-y-auto p-4 pb-28 max-w-4xl w-full mx-auto space-y-5">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y pwa-scroll-container p-4 pb-28 max-w-4xl w-full mx-auto space-y-5">
           <div className="rounded-3xl bg-slate-900 border border-slate-800 p-4 space-y-2">
             <label className="text-xs font-semibold text-emerald-400">
               বিষয়ের ডিসক্রিপশন বক্স
@@ -512,7 +612,13 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
           </button>
 
           {saveMessage && (
-            <div className="rounded-2xl bg-emerald-500/15 border border-emerald-500/35 px-4 py-3 text-xs font-semibold text-emerald-300 text-center">
+            <div
+              className={`rounded-2xl border px-4 py-3 text-xs font-semibold text-center ${
+                saveIsError
+                  ? 'bg-rose-500/15 border-rose-500/35 text-rose-300'
+                  : 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300'
+              }`}
+            >
               {saveMessage}
             </div>
           )}

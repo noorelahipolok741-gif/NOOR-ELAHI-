@@ -1060,6 +1060,23 @@ async function startServer() {
   app.set('trust proxy', true);
   app.use(express.json({ limit: '2mb' }));
 
+  // Ensure every device and installed PWA always fetches latest app shell, manifest, Service Worker & API state
+  app.use((req, res, next) => {
+    const reqPath = req.path;
+    if (
+      reqPath === '/' ||
+      reqPath === '/index.html' ||
+      reqPath === '/sw.js' ||
+      reqPath === '/manifest.json' ||
+      (reqPath.startsWith('/api/') && !reqPath.startsWith('/api/proxy-media'))
+    ) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+    next();
+  });
+
   // Health check
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
@@ -1534,12 +1551,62 @@ async function startServer() {
     });
   });
 
+  const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
+
+  function getServerNotifCreatedAtMs(item: Record<string, unknown>): number {
+    if (typeof item.createdAtMs === 'number' && Number.isFinite(item.createdAtMs) && item.createdAtMs > 0) {
+      return item.createdAtMs;
+    }
+    if (typeof item.createdAt === 'number' && Number.isFinite(item.createdAt) && item.createdAt > 0) {
+      return item.createdAt;
+    }
+    if (typeof item.createdAt === 'string' && item.createdAt.trim()) {
+      const parsed = Date.parse(item.createdAt);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+    if (typeof item.id === 'string') {
+      const m = item.id.match(/^notif_(\d{10,15})/);
+      if (m?.[1]) {
+        const ts = Number(m[1]);
+        if (Number.isFinite(ts) && ts > 0) return ts;
+      }
+    }
+    return 0;
+  }
+
+  function pruneExpiredServerNotifications(
+    list: Array<Record<string, unknown>>,
+    now = Date.now()
+  ): Array<Record<string, unknown>> {
+    const dedup = new Map<string, Record<string, unknown>>();
+    for (const raw of list) {
+      if (!raw || typeof raw !== 'object' || raw.isActive === false) continue;
+      const id = typeof raw.id === 'string' ? raw.id : '';
+      if (!id) continue;
+      const createdAtMs = getServerNotifCreatedAtMs(raw);
+      if (createdAtMs <= 0 || now - createdAtMs >= NOTIFICATION_TTL_MS) continue;
+      dedup.set(id, {
+        ...raw,
+        createdAtMs,
+        createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date(createdAtMs).toISOString(),
+      });
+    }
+    return Array.from(dedup.values())
+      .sort((a, b) => (Number(b.createdAtMs) || 0) - (Number(a.createdAtMs) || 0))
+      .slice(0, 40);
+  }
+
   // Catalog mirror so Number-login users and offline caches stay synced with Admin's Vault saves
   app.get('/api/catalog', (_req, res) => {
     const store = ensureStore();
+    const pruned = pruneExpiredServerNotifications(store.notifications || []);
+    if (pruned.length !== (store.notifications || []).length) {
+      store.notifications = pruned;
+      saveStore(store);
+    }
     res.json({
       subjects: store.subjects,
-      notifications: store.notifications,
+      notifications: pruned,
     });
   });
 
@@ -1549,18 +1616,53 @@ async function startServer() {
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
-    const { subject, notification } = req.body as {
+    const {
+      subject,
+      subjectsMap,
+      notification,
+      notifications,
+      notificationsList,
+    } = req.body as {
       subject?: { id: string } & Record<string, unknown>;
+      subjectsMap?: Record<string, { id: string } & Record<string, unknown>>;
       notification?: Record<string, unknown>;
+      notifications?: Array<Record<string, unknown>>;
+      notificationsList?: Array<Record<string, unknown>>;
     };
+
     const store = ensureStore();
+    if (subjectsMap && typeof subjectsMap === 'object') {
+      store.subjects = { ...store.subjects, ...subjectsMap };
+    }
     if (subject && typeof subject.id === 'string') {
       store.subjects[subject.id] = subject;
     }
-    if (notification) {
-      store.notifications.unshift(notification);
-      store.notifications = store.notifications.slice(0, 40);
+
+    const now = Date.now();
+    if (Array.isArray(notificationsList)) {
+      store.notifications = pruneExpiredServerNotifications(notificationsList, now);
+    } else {
+      const incomingNotifs: Array<Record<string, unknown>> = [];
+      if (Array.isArray(notifications)) {
+        incomingNotifs.push(...notifications);
+      }
+      if (notification) {
+        incomingNotifs.push(notification);
+      }
+      const stamped = incomingNotifs.map((n) => {
+        const ts = getServerNotifCreatedAtMs(n) || now;
+        return {
+          ...n,
+          createdAtMs: ts,
+          createdAt: typeof n.createdAt === 'string' ? n.createdAt : new Date(ts).toISOString(),
+        };
+      });
+      store.notifications = pruneExpiredServerNotifications(
+        [...stamped, ...(store.notifications || [])],
+        now
+      );
     }
+
     saveStore(store);
     res.json({ ok: true });
   });
@@ -1715,8 +1817,28 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distDir));
+    app.use(
+      express.static(distDir, {
+        setHeaders(res, filePath) {
+          const normalizedPath = filePath.replace(/\\/g, '/');
+          if (
+            normalizedPath.endsWith('/index.html') ||
+            normalizedPath.endsWith('/sw.js') ||
+            normalizedPath.endsWith('/manifest.json')
+          ) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+          } else if (normalizedPath.includes('/assets/')) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }

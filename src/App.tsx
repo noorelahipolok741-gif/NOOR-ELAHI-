@@ -59,6 +59,13 @@ import {
   removeAppStateBackup,
   saveAppStateBackup,
 } from './lib/offlineStorage';
+import {
+  formatNotificationRemainingLabel,
+  loadSeenNotificationIds,
+  markNotificationsSeen,
+  normalizeActiveNotifications,
+  serializeNotificationsForCache,
+} from './lib/notifications';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthSuitcaseScreen } from './components/AuthSuitcaseScreen';
@@ -139,6 +146,12 @@ const CACHE_SUBJECTS_KEY = 'noor_elahi_cache_subjects_v1';
 const CACHE_NOTIFS_KEY = 'noor_elahi_cache_notifs_v1';
 const CACHE_PROGRESS_KEY = 'noor_elahi_cache_progress_v1';
 const CACHE_DOWNLOADS_KEY = 'noor_elahi_cache_downloads_v1';
+const CACHE_VAULT_HASH_KEY = 'noor_elahi_cache_vault_hash_v1';
+
+interface CachedVaultHash {
+  uid: string;
+  hash: string;
+}
 
 function readLocalCache<T>(key: string, fallback: T): T {
   try {
@@ -161,11 +174,13 @@ function writeLocalCache(key: string, value: unknown) {
 function clearCachedUser() {
   try {
     localStorage.removeItem(CACHE_USER_KEY);
+    localStorage.removeItem(CACHE_VAULT_HASH_KEY);
     localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
   } catch {
     // Ignore storage error
   }
   removeAppStateBackup(CACHE_USER_KEY).catch(() => {});
+  removeAppStateBackup(CACHE_VAULT_HASH_KEY).catch(() => {});
 }
 
 function handleListenerErrorSafe(
@@ -215,7 +230,7 @@ function AppContent() {
     readLocalCache<Record<string, SubjectDoc>>(CACHE_SUBJECTS_KEY, {})
   );
   const [notifications, setNotifications] = useState<AppNotification[]>(() =>
-    readLocalCache<AppNotification[]>(CACHE_NOTIFS_KEY, [])
+    normalizeActiveNotifications(readLocalCache<AppNotification[]>(CACHE_NOTIFS_KEY, []))
   );
   const [progressMap, setProgressMap] = useState<Record<string, WatchProgress>>(() =>
     readLocalCache<Record<string, WatchProgress>>(CACHE_PROGRESS_KEY, {})
@@ -226,13 +241,30 @@ function AppContent() {
   const [downloadTasks, setDownloadTasks] = useState<Record<string, DownloadTask>>({});
 
   // Admin state
-  const [vaultHash, setVaultHash] = useState<string | null>(null);
+  const [vaultHash, setVaultHash] = useState<string | null>(() => {
+    if (initialCachedUser?.role !== 'admin') return null;
+    const cachedVault = readLocalCache<CachedVaultHash | null>(CACHE_VAULT_HASH_KEY, null);
+    if (cachedVault?.uid === initialCachedUser.uid && cachedVault.hash) {
+      return cachedVault.hash;
+    }
+    return null;
+  });
   const [firestoreInbox, setFirestoreInbox] = useState<InboxMessage[]>([]);
   const [serverInbox, setServerInbox] = useState<InboxMessage[]>([]);
 
-  // Notifications badge & banner
-  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+  // Notifications seen tracking & banner
+  const [seenNotifIds, setSeenNotifIds] = useState<Set<string>>(() => loadSeenNotificationIds());
   const [topBanner, setTopBanner] = useState<string | null>(null);
+
+  const unreadNotifCount = useMemo(
+    () => notifications.filter((n) => !seenNotifIds.has(n.id)).length,
+    [notifications, seenNotifIds]
+  );
+
+  const persistVaultHash = useCallback((uid: string, hash: string) => {
+    setVaultHash(hash);
+    writeLocalCache(CACHE_VAULT_HASH_KEY, { uid, hash } satisfies CachedVaultHash);
+  }, []);
 
   // Report Issue modal inputs
   const [reportText, setReportText] = useState('');
@@ -374,7 +406,20 @@ function AppContent() {
 
       const backedUpNotifs = await loadAppStateBackup<AppNotification[]>(CACHE_NOTIFS_KEY);
       if (active && backedUpNotifs && backedUpNotifs.length > 0) {
-        setNotifications((curr) => (curr.length > 0 ? curr : backedUpNotifs));
+        const freshBackedUp = normalizeActiveNotifications(backedUpNotifs);
+        if (freshBackedUp.length > 0) {
+          setNotifications((curr) => (curr.length > 0 ? curr : freshBackedUp));
+        } else {
+          writeLocalCache(CACHE_NOTIFS_KEY, []);
+        }
+      }
+
+      const backedUpVault = await loadAppStateBackup<CachedVaultHash>(CACHE_VAULT_HASH_KEY);
+      if (active && backedUpVault?.hash && backedUpVault?.uid) {
+        const resolvedUid = initialCachedUser?.uid || (await loadAppStateBackup<AppUser>(CACHE_USER_KEY))?.uid;
+        if (resolvedUid && resolvedUid === backedUpVault.uid) {
+          setVaultHash((curr) => curr || backedUpVault.hash);
+        }
       }
 
       const backedUpProgress = await loadAppStateBackup<Record<string, WatchProgress>>(CACHE_PROGRESS_KEY);
@@ -391,6 +436,32 @@ function AppContent() {
     return () => {
       active = false;
       clearTimeout(safetyTimer);
+    };
+  }, []);
+
+  // Automatically remove notifications whose 24-hour window expires while the app is open
+  useEffect(() => {
+    const pruneExpired = () => {
+      setNotifications((prev) => {
+        const next = normalizeActiveNotifications(prev);
+        if (next.length !== prev.length) {
+          writeLocalCache(CACHE_NOTIFS_KEY, serializeNotificationsForCache(next));
+          return next;
+        }
+        return prev;
+      });
+    };
+
+    const interval = window.setInterval(pruneExpired, 30_000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        pruneExpired();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, []);
 
@@ -694,32 +765,53 @@ function AppContent() {
     return () => unsub();
   }, []);
 
-  // Firestore Real-time Listeners for Google Users (Subjects, Notifications, Progress, Downloads, Admin Config & Inbox)
+  // Firestore Real-time Listeners for Google Users & Live Catalog Refresh for Number Users
   useEffect(() => {
     if (!appUser) return;
 
     if (appUser.authMode === 'number') {
-      // Load catalog mirror for Number-login users
-      fetch('/api/catalog')
-        .then((r) => r.json())
-        .then((data: { subjects?: Record<string, SubjectDoc>; notifications?: AppNotification[] }) => {
-          if (data.subjects) {
-            setSubjects(data.subjects);
-            writeLocalCache(CACHE_SUBJECTS_KEY, data.subjects);
-          }
-          if (data.notifications) {
-            setNotifications(data.notifications);
-            writeLocalCache(CACHE_NOTIFS_KEY, data.notifications);
-          }
-        })
-        .catch(() => {});
+      const fetchCatalog = () => {
+        fetch('/api/catalog', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data: { subjects?: Record<string, SubjectDoc>; notifications?: AppNotification[] } | null) => {
+            if (!data) return;
+            if (data.subjects) {
+              setSubjects(data.subjects);
+              writeLocalCache(CACHE_SUBJECTS_KEY, data.subjects);
+            }
+            if (data.notifications) {
+              const activeNotifs = serializeNotificationsForCache(data.notifications);
+              setNotifications(activeNotifs);
+              writeLocalCache(CACHE_NOTIFS_KEY, activeNotifs);
+            }
+          })
+          .catch(() => {});
+      };
+
+      fetchCatalog();
+
+      const onVisibility = () => {
+        if (document.visibilityState === 'visible' && navigator.onLine) {
+          fetchCatalog();
+        }
+      };
+      const onOnline = () => fetchCatalog();
+      const pollId = window.setInterval(() => {
+        if (document.visibilityState === 'visible' && navigator.onLine) {
+          fetchCatalog();
+        }
+      }, 45_000);
+      document.addEventListener('visibilitychange', onVisibility);
+      window.addEventListener('online', onOnline);
 
       if (appUser.bearerToken) {
         fetch('/api/number-user/state', {
+          cache: 'no-store',
           headers: { Authorization: `Bearer ${appUser.bearerToken}` },
         })
-          .then((r) => r.json())
-          .then((data: { progress?: Record<string, WatchProgress>; downloads?: Record<string, DownloadRecord> }) => {
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data: { progress?: Record<string, WatchProgress>; downloads?: Record<string, DownloadRecord> } | null) => {
+            if (!data) return;
             if (data.progress) {
               setProgressMap(data.progress);
               writeLocalCache(CACHE_PROGRESS_KEY, data.progress);
@@ -734,7 +826,12 @@ function AppContent() {
           })
           .catch(() => {});
       }
-      return;
+
+      return () => {
+        clearInterval(pollId);
+        document.removeEventListener('visibilitychange', onVisibility);
+        window.removeEventListener('online', onOnline);
+      };
     }
 
     if (!firebaseUser) return;
@@ -753,12 +850,29 @@ function AppContent() {
           });
           setSubjects(map);
           writeLocalCache(CACHE_SUBJECTS_KEY, map);
+
+          // Mirror live Firestore catalog to server store for cross-device Number-login users
+          if (appUser.role === 'admin' && !snap.metadata.fromCache && navigator.onLine && Object.keys(map).length > 0) {
+            firebaseUser
+              .getIdToken()
+              .then((idToken) =>
+                fetch('/api/catalog/sync', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${idToken}`,
+                  },
+                  body: JSON.stringify({ subjectsMap: map }),
+                })
+              )
+              .catch(() => {});
+          }
         },
         (err) => handleListenerErrorSafe(err, OperationType.LIST, 'subjects')
       )
     );
 
-    // 2. Notifications
+    // 2. Notifications (strictly active within 24 hours; admin automatically deletes expired docs)
     const qNotifs = query(
       collection(db, 'notifications'),
       where('isActive', '==', true)
@@ -767,20 +881,44 @@ function AppContent() {
       onSnapshot(
         qNotifs,
         (snap) => {
-          const list: AppNotification[] = [];
-          snap.forEach((d) => list.push(d.data() as AppNotification));
-          list.sort((a, b) => {
-            const ta = (a.createdAt as { toMillis?: () => number } | undefined)?.toMillis?.() || 0;
-            const tb = (b.createdAt as { toMillis?: () => number } | undefined)?.toMillis?.() || 0;
-            return tb - ta;
-          });
-          setNotifications((prev) => {
-            if (list.length > prev.length && prev.length > 0) {
-              setUnreadNotifCount((c) => c + (list.length - prev.length));
+          const now = Date.now();
+          const candidates: AppNotification[] = [];
+          const expiredIds: string[] = [];
+
+          snap.forEach((d) => {
+            const raw = d.data() as AppNotification;
+            const normalized = normalizeActiveNotifications([raw], now);
+            if (normalized.length > 0) {
+              candidates.push(normalized[0]);
+            } else if (!d.metadata.hasPendingWrites) {
+              expiredIds.push(d.id);
             }
-            return list;
           });
-          writeLocalCache(CACHE_NOTIFS_KEY, list);
+
+          const activeList = serializeNotificationsForCache(candidates);
+          setNotifications(activeList);
+          writeLocalCache(CACHE_NOTIFS_KEY, activeList);
+
+          if (appUser.role === 'admin' && navigator.onLine) {
+            for (const expId of expiredIds) {
+              deleteDoc(doc(db, 'notifications', expId)).catch(() => {});
+            }
+            if (!snap.metadata.fromCache) {
+              firebaseUser
+                .getIdToken()
+                .then((idToken) =>
+                  fetch('/api/catalog/sync', {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: `Bearer ${idToken}`,
+                    },
+                    body: JSON.stringify({ notificationsList: activeList }),
+                  })
+                )
+                .catch(() => {});
+            }
+          }
         },
         (err) => handleListenerErrorSafe(err, OperationType.LIST, 'notifications')
       )
@@ -835,9 +973,9 @@ function AppContent() {
           (snap) => {
             if (snap.exists()) {
               const d = snap.data() as { vaultPasswordHash?: string };
-              setVaultHash(d.vaultPasswordHash || null);
-            } else {
-              setVaultHash(null);
+              if (d.vaultPasswordHash) {
+                persistVaultHash(firebaseUser.uid, d.vaultPasswordHash);
+              }
             }
           },
           (err) => handleListenerErrorSafe(err, OperationType.GET, 'adminConfig/vault')
@@ -862,6 +1000,7 @@ function AppContent() {
         .getIdToken()
         .then((idToken) =>
           fetch('/api/inbox/admin', {
+            cache: 'no-store',
             headers: { Authorization: `Bearer ${idToken}` },
           })
             .then((r) => (r.ok ? r.json() : { items: [] }))
@@ -879,7 +1018,7 @@ function AppContent() {
     return () => {
       for (const u of unsubs) u();
     };
-  }, [appUser, firebaseUser]);
+  }, [appUser, firebaseUser, persistVaultHash]);
 
   const combinedInbox = useMemo(() => {
     return [...firestoreInbox, ...serverInbox];
@@ -1129,14 +1268,18 @@ function AppContent() {
   };
 
   const handleSaveVaultPasswordHash = async (hash: string) => {
-    if (!firebaseUser) return;
+    const activeFbUser = firebaseUser || auth.currentUser;
+    if (!activeFbUser) return;
+    persistVaultHash(activeFbUser.uid, hash);
     try {
-      await setDoc(doc(db, 'adminConfig', 'vault'), {
+      const writeOp = setDoc(doc(db, 'adminConfig', 'vault'), {
         vaultPasswordHash: hash,
-        updatedBy: firebaseUser.uid,
+        updatedBy: activeFbUser.uid,
         updatedAt: serverTimestamp(),
       });
-      setVaultHash(hash);
+      if (navigator.onLine) {
+        await Promise.race([writeOp, new Promise<void>((r) => window.setTimeout(r, 8000))]);
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'adminConfig/vault');
     }
@@ -1146,28 +1289,60 @@ function AppContent() {
     subject: SubjectDoc,
     addedItems: Array<{ sectionTitle: string; itemName: string }>
   ) => {
-    if (!firebaseUser) return;
+    const authWithReady = auth as unknown as { authStateReady?: () => Promise<void> };
+    if (!firebaseUser && !auth.currentUser && typeof authWithReady.authStateReady === 'function') {
+      await Promise.race([
+        authWithReady.authStateReady().catch(() => {}),
+        new Promise<void>((r) => window.setTimeout(r, 2500)),
+      ]);
+    }
+
+    const activeFbUser = firebaseUser || auth.currentUser;
+    if (!activeFbUser) {
+      throw new Error(
+        'অ্যাডমিন Google সেশন সক্রিয় নেই। প্রোফাইল থেকে সাইন আউট করে পুনরায় Google দিয়ে লগইন করে সেভ করুন।'
+      );
+    }
+
     const safeSubject: SubjectDoc = {
       ...subject,
       name: (subject.name || '').slice(0, 120),
       description: (subject.description || '').slice(0, 2000),
       sections: (subject.sections || []).slice(0, 40),
     };
+
+    // Update local state and offline cache immediately so changes appear everywhere right away
+    setSubjects((prev) => {
+      const next = { ...prev, [safeSubject.id]: safeSubject };
+      writeLocalCache(CACHE_SUBJECTS_KEY, next);
+      return next;
+    });
+
     const payload = {
       ...safeSubject,
-      updatedBy: firebaseUser.uid,
+      updatedBy: activeFbUser.uid,
       updatedAt: serverTimestamp(),
     };
+
     try {
-      await setDoc(doc(db, 'subjects', subject.id), payload);
+      const subjectWrite = setDoc(doc(db, 'subjects', subject.id), payload);
+      if (navigator.onLine) {
+        await Promise.race([
+          subjectWrite,
+          new Promise<void>((resolve) => window.setTimeout(resolve, 9000)),
+        ]);
+      }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `subjects/${subject.id}`);
     }
 
-    let firstNotif: AppNotification | null = null;
-    for (const added of addedItems) {
-      const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      const notifObj: AppNotification = {
+    const nowMs = Date.now();
+    const createdNotifs: AppNotification[] = [];
+    for (let idx = 0; idx < addedItems.length; idx += 1) {
+      const added = addedItems[idx];
+      const notifTs = nowMs + idx;
+      const notifId = `notif_${notifTs}_${Math.random().toString(36).slice(2, 7)}`;
+      const firestoreNotif = {
         id: notifId,
         subjectId: subject.id,
         subjectName: subject.name,
@@ -1176,34 +1351,51 @@ function AppContent() {
         message: `${subject.name} বিষয়ের "${added.sectionTitle}" শিরোনামে "${added.itemName}" যোগ করা হয়েছে।`,
         isActive: true,
       };
-      if (!firstNotif) firstNotif = notifObj;
+      createdNotifs.push({ ...firestoreNotif, createdAtMs: notifTs });
+
       try {
-        await setDoc(doc(db, 'notifications', notifId), {
-          ...notifObj,
-          createdBy: firebaseUser.uid,
+        const notifWrite = setDoc(doc(db, 'notifications', notifId), {
+          ...firestoreNotif,
+          createdBy: activeFbUser.uid,
           createdAt: serverTimestamp(),
         });
+        if (navigator.onLine) {
+          await Promise.race([
+            notifWrite,
+            new Promise<void>((resolve) => window.setTimeout(resolve, 6000)),
+          ]);
+        }
       } catch (err) {
         handleFirestoreError(err, OperationType.CREATE, `notifications/${notifId}`);
       }
     }
 
-    // Mirror to server catalog for Number-login users
-    try {
-      const idToken = await firebaseUser.getIdToken();
-      await fetch('/api/catalog/sync', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          subject: { ...safeSubject, updatedBy: firebaseUser.uid },
-          notification: firstNotif || undefined,
-        }),
+    if (createdNotifs.length > 0) {
+      setNotifications((prev) => {
+        const next = serializeNotificationsForCache([...createdNotifs, ...prev]);
+        writeLocalCache(CACHE_NOTIFS_KEY, next);
+        return next;
       });
-    } catch {
-      // Non-critical mirror failure
+    }
+
+    // Mirror to server catalog for Number-login users
+    if (navigator.onLine) {
+      try {
+        const idToken = await activeFbUser.getIdToken();
+        await fetch('/api/catalog/sync', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${idToken}`,
+          },
+          body: JSON.stringify({
+            subject: { ...safeSubject, updatedBy: activeFbUser.uid },
+            notifications: createdNotifs.length > 0 ? createdNotifs : undefined,
+          }),
+        });
+      } catch {
+        // Non-critical mirror failure
+      }
     }
   };
 
@@ -1417,7 +1609,7 @@ function AppContent() {
                 type="button"
                 onClick={() => {
                   pushNav((p) => ({ ...p, notifOpen: true }));
-                  setUnreadNotifCount(0);
+                  setSeenNotifIds(markNotificationsSeen(notifications));
                 }}
                 className="relative min-w-[40px] min-h-[40px] rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-200 hover:bg-slate-800 transition"
                 aria-label="নোটিফিকেশন"
@@ -1657,6 +1849,7 @@ function AppContent() {
                 }}
                 subjects={subjects}
                 storedVaultHash={vaultHash}
+                isOnline={isOnline}
                 selectedSubjectId={vaultSubjectId}
                 onSelectSubjectId={(sid) => {
                   if (sid === null) {
@@ -1664,6 +1857,9 @@ function AppContent() {
                   } else {
                     pushNav((p) => ({ ...p, vaultSubjectId: sid }));
                   }
+                }}
+                onCacheVaultHash={(hash) => {
+                  if (appUser?.uid) persistVaultHash(appUser.uid, hash);
                 }}
                 onSaveVaultPasswordHash={handleSaveVaultPasswordHash}
                 onSaveSubject={handleSaveSubject}
@@ -1683,7 +1879,12 @@ function AppContent() {
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
               <div className="w-full max-w-md max-h-[80vh] flex flex-col rounded-3xl bg-slate-900 border border-slate-800 shadow-2xl overflow-hidden">
                 <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
-                  <h3 className="text-base font-bold text-white">নোটিফিকেশন</h3>
+                  <div>
+                    <h3 className="text-base font-bold text-white">নোটিফিকেশন</h3>
+                    <p className="text-[11px] text-slate-400">
+                      নতুন আপডেটগুলো ২৪ ঘণ্টা পর স্বয়ংক্রিয়ভাবে মুছে যাবে
+                    </p>
+                  </div>
                   <button
                     type="button"
                     onClick={() => goBackOr((p) => ({ ...p, notifOpen: false }))}
@@ -1692,20 +1893,25 @@ function AppContent() {
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3">
+                <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y pwa-scroll-container p-4 space-y-3">
                   {notifications.length === 0 ? (
                     <p className="text-center text-xs text-slate-400 py-8">
-                      এখনও কোনো নোটিফিকেশন আসেনি।
+                      গত ২৪ ঘণ্টায় কোনো নতুন নোটিফিকেশন আসেনি।
                     </p>
                   ) : (
                     notifications.map((n) => (
                       <div
                         key={n.id}
-                        className="rounded-2xl bg-slate-950 border border-emerald-500/20 p-3.5 space-y-1"
+                        className="rounded-2xl bg-slate-950 border border-emerald-500/20 p-3.5 space-y-1.5"
                       >
-                        <p className="text-xs font-semibold text-emerald-400">
-                          {n.subjectName} · {n.sectionTitle}
-                        </p>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs font-semibold text-emerald-400 truncate">
+                            {n.subjectName} · {n.sectionTitle}
+                          </p>
+                          <span className="text-[10px] font-mono-num text-amber-300/80 shrink-0">
+                            {formatNotificationRemainingLabel(n)}
+                          </span>
+                        </div>
                         <p className="text-sm text-slate-200">{n.message}</p>
                       </div>
                     ))

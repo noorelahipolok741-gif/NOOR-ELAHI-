@@ -609,7 +609,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
   const normalizedPdfUrl = normalizeMediaUrl(pdfUrl);
   const directExternalHref =
-    !errorMsg && pdfBytes && normalizedPdfUrl && /^https?:/i.test(normalizedPdfUrl)
+    typeof navigator !== 'undefined' && !navigator.onLine && blobUrl
+      ? blobUrl
+      : !errorMsg && pdfBytes && normalizedPdfUrl && /^https?:/i.test(normalizedPdfUrl)
       ? resolveStreamUrl(normalizedPdfUrl, 'pdf')
       : normalizedPdfUrl;
   const downloadFilename = `${sanitizeBaseFilename(title || 'document')}.pdf`;

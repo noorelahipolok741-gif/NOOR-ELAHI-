@@ -193,6 +193,7 @@ export interface AppNotification {
   message: string;
   isActive: boolean;
   createdAt?: unknown;
+  createdAtMs?: number;
 }
 
 export interface InboxMessage {
