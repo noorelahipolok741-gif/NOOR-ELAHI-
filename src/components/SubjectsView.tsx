@@ -366,10 +366,8 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
       ) : (
         <div className="space-y-6">
           {sections.map((section) => {
-            const uploadedVideoCount = (section.items || []).filter((i) =>
-              Boolean(i.videoUrl?.trim())
-            ).length;
-            let classCounter = 0;
+            const items = section.items || [];
+            const totalSlotsCount = items.length;
 
             return (
               <div
@@ -388,36 +386,25 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                     )}
                   </div>
                   <span className="shrink-0 text-xs font-mono-num font-semibold text-emerald-400 bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-1">
-                    {uploadedVideoCount}টি
+                    মোট {totalSlotsCount}টি ক্লাস
                   </span>
                 </div>
 
-                {(!section.items || section.items.length === 0) ? (
-                  <div className="rounded-2xl bg-slate-950/70 border border-slate-800/70 p-4 text-center text-xs text-slate-400">
-                    এখনও কিছু আপলোড হয়নি
+                {totalSlotsCount === 0 ? (
+                  <div className="rounded-2xl bg-slate-950/80 border border-slate-800/80 p-4 grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-center">
+                    <div className="rounded-xl bg-slate-900/70 border border-dashed border-slate-800 px-3 py-3 text-xs text-slate-400">
+                      কোন ভিডিও দেওয়া হয়নি
+                    </div>
+                    <div className="rounded-xl bg-slate-900/70 border border-dashed border-slate-800 px-3 py-3 text-xs text-slate-400">
+                      কোন পিডিএফ দেওয়া হয়নি
+                    </div>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                    {section.items.map((item) => {
-                      const hasContent = Boolean(item.videoUrl?.trim() || item.pdfUrl?.trim());
-                      if (!hasContent) {
-                        return (
-                          <div
-                            key={item.id}
-                            className="rounded-2xl bg-slate-950/70 border border-slate-800/70 p-4 flex items-center justify-between"
-                          >
-                            <span className="text-xs font-medium text-slate-400">
-                              {item.name?.trim() || 'নতুন স্লট'}
-                            </span>
-                            <span className="text-xs text-slate-500">
-                              এখনও কিছু আপলোড হয়নি
-                            </span>
-                          </div>
-                        );
-                      }
-
-                      classCounter += 1;
-                      const currentClassNum = classCounter;
+                    {items.map((item, itemIdx) => {
+                      const currentClassNum = itemIdx + 1;
+                      const hasVideo = Boolean(item.videoUrl?.trim());
+                      const hasPdf = Boolean(item.pdfUrl?.trim());
                       const isDownloaded = Boolean(downloads[item.id]);
                       const activeTask = downloadTasks[item.id];
                       const displayName = item.name?.trim() || `ক্লাস ${currentClassNum}`;
@@ -445,8 +432,8 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                           </div>
 
                           <div className="space-y-2.5">
-                            <div className="flex items-center gap-2">
-                              {item.videoUrl?.trim() && (
+                            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                              {hasVideo ? (
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -467,9 +454,13 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                                   <Play className="w-4 h-4 fill-current shrink-0" />
                                   <span>দেখুন</span>
                                 </button>
+                              ) : (
+                                <div className="flex-1 min-h-[48px] px-3 rounded-2xl bg-slate-900/75 border border-dashed border-slate-700/80 flex items-center justify-center text-center text-xs font-medium text-slate-400">
+                                  কোন ভিডিও দেওয়া হয়নি
+                                </div>
                               )}
 
-                              {item.pdfUrl?.trim() && (
+                              {hasPdf ? (
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -487,23 +478,29 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                                   <FileText className="w-4 h-4 shrink-0" />
                                   <span>PDF</span>
                                 </button>
+                              ) : (
+                                <div className="min-h-[48px] px-3.5 rounded-2xl bg-slate-900/75 border border-dashed border-slate-700/80 flex items-center justify-center text-center text-xs font-medium text-slate-400 shrink-0">
+                                  কোন পিডিএফ দেওয়া হয়নি
+                                </div>
                               )}
                             </div>
 
-                            <LiquidDownloadBox
-                              itemId={item.id}
-                              subjectId={selectedMeta.id}
-                              sectionId={section.id}
-                              sectionTitle={section.title || selectedMeta.name}
-                              classNumber={currentClassNum}
-                              videoName={displayName}
-                              videoUrl={item.videoUrl}
-                              pdfUrl={item.pdfUrl}
-                              isDownloaded={isDownloaded}
-                              task={activeTask}
-                              isOnline={isOnline}
-                              onOfflineAttempt={onOfflineAlert}
-                            />
+                            {(hasVideo || hasPdf) && (
+                              <LiquidDownloadBox
+                                itemId={item.id}
+                                subjectId={selectedMeta.id}
+                                sectionId={section.id}
+                                sectionTitle={section.title || selectedMeta.name}
+                                classNumber={currentClassNum}
+                                videoName={displayName}
+                                videoUrl={item.videoUrl}
+                                pdfUrl={item.pdfUrl}
+                                isDownloaded={isDownloaded}
+                                task={activeTask}
+                                isOnline={isOnline}
+                                onOfflineAttempt={onOfflineAlert}
+                              />
+                            )}
                           </div>
                         </div>
                       );

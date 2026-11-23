@@ -26,7 +26,6 @@
   *::before,
   *::after {
     touch-action: pan-x pan-y;
-    overscroll-behavior-y: none;
   }
 
   input[type="range"] {
@@ -38,6 +37,12 @@
     user-select: none;
     -webkit-user-select: none;
   }
+}
+
+.pwa-scroll-container {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
 }
 
 .font-display {

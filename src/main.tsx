@@ -8,7 +8,10 @@ function findScrollableParent(el: EventTarget | null): HTMLElement | null {
   while (node && node !== document.body && node !== document.documentElement) {
     const style = window.getComputedStyle(node);
     const overflowY = style.overflowY;
-    if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) {
+    if (
+      (overflowY === 'auto' || overflowY === 'scroll') &&
+      (node.scrollHeight > node.clientHeight + 1 || node.classList.contains('pwa-scroll-container'))
+    ) {
       return node;
     }
     node = node.parentElement;
@@ -20,6 +23,8 @@ function findScrollableParent(el: EventTarget | null): HTMLElement | null {
 if (typeof window !== 'undefined') {
   let touchStartY = 0;
   let touchStartX = 0;
+  let lastTouchY = 0;
+  let gestureScrolledDown = false;
 
   document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false });
   document.addEventListener('gesturechange', (e) => e.preventDefault(), { passive: false });
@@ -34,6 +39,8 @@ if (typeof window !== 'undefined') {
       }
       touchStartY = e.touches[0].clientY;
       touchStartX = e.touches[0].clientX;
+      lastTouchY = touchStartY;
+      gestureScrolledDown = false;
     },
     { passive: false }
   );
@@ -49,14 +56,38 @@ if (typeof window !== 'undefined') {
       if (target?.closest('.plyr__progress, input[type="range"]')) {
         return;
       }
-      const dy = e.touches[0].clientY - touchStartY;
-      const dx = e.touches[0].clientX - touchStartX;
-      // Block vertical downward pull-to-refresh when already at scrollTop <= 0 or outside a scrollable box
-      if (dy > 12 && Math.abs(dy) > Math.abs(dx)) {
-        const scroller = findScrollableParent(e.target);
-        if (!scroller || scroller.scrollTop <= 0) {
+
+      const currentY = e.touches[0].clientY;
+      const currentX = e.touches[0].clientX;
+      const stepDy = currentY - lastTouchY;
+      lastTouchY = currentY;
+
+      const totalDy = currentY - touchStartY;
+      const totalDx = currentX - touchStartX;
+      const scroller = findScrollableParent(e.target);
+
+      if (scroller) {
+        // Finger moving up (stepDy < 0) or container already scrolled down -> allow native scroll freely
+        if (scroller.scrollTop > 1 || stepDy < -1 || totalDy < -4) {
+          gestureScrolledDown = true;
+          return;
+        }
+        // Only prevent pull-to-refresh when pulling straight down from scrollTop === 0 before scrolling down
+        if (
+          scroller.scrollTop <= 0 &&
+          stepDy > 1 &&
+          totalDy > 10 &&
+          Math.abs(totalDy) > Math.abs(totalDx) &&
+          !gestureScrolledDown
+        ) {
           e.preventDefault();
         }
+        return;
+      }
+
+      // Outside any scrollable region (e.g. fixed top header / bottom nav): block downward pull-to-refresh
+      if (totalDy > 10 && Math.abs(totalDy) > Math.abs(totalDx)) {
+        e.preventDefault();
       }
     },
     { passive: false }

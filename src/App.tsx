@@ -1039,7 +1039,7 @@ function AppContent() {
           Authorization: `Bearer ${idToken}`,
         },
         body: JSON.stringify({
-          subject: { ...subject, updatedBy: firebaseUser.uid },
+          subject: { ...safeSubject, updatedBy: firebaseUser.uid },
           notification: firstNotif || undefined,
         }),
       });
@@ -1296,8 +1296,8 @@ function AppContent() {
           </header>
 
           {/* Main Scrollable Viewport (isolated inside 100dvh shell so pull-to-refresh never triggers) */}
-          <main className="flex-1 w-full overflow-y-auto overflow-x-hidden overscroll-none">
-            <div className="w-full max-w-6xl mx-auto px-4 pt-5 pb-24">
+          <main className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain touch-pan-y pwa-scroll-container">
+            <div className="w-full max-w-6xl mx-auto px-4 pt-5 pb-28">
               {activeTab === 'subjects' && (
                 <SubjectsView
                   subjects={subjects}
