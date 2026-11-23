@@ -160,15 +160,15 @@ export async function listOfflineMedia(): Promise<OfflineMediaEntry[]> {
 }
 
 export function normalizeMediaUrl(rawUrl: string): string {
-  const trimmed = (rawUrl || '').trim();
+  const trimmed = (rawUrl || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
   if (!trimmed) return '';
   if (trimmed.startsWith('blob:') || trimmed.startsWith('data:') || trimmed.startsWith('/')) {
     return trimmed;
   }
   let target = trimmed;
   if (/\s/.test(target)) {
-    const match = target.match(/https?:\/\/[^\s<>"']+/i);
-    if (match?.[0]) target = match[0];
+    const match = target.match(/(?:https?:\/\/|drive\.google\.com\/|docs\.google\.com\/)[^\s<>"']+/i);
+    if (match?.[0]) target = match[0].replace(/[.,;'">]+$/, '');
   }
   const withProto = /^https?:\/\//i.test(target) ? target : `https://${target}`;
   try {
@@ -234,7 +234,7 @@ export function extractGoogleDocsPreviewUrl(rawUrl: string): string | null {
   try {
     const u = new URL(normalizeMediaUrl(rawUrl));
     if (u.hostname.includes('docs.google.com')) {
-      const m = u.pathname.match(/\/(document|presentation|spreadsheets)\/d\/([a-zA-Z0-9_-]+)/);
+      const m = u.pathname.match(/\/(document|presentation|spreadsheets)(?:\/u\/\d+)?\/d\/([a-zA-Z0-9_-]+)/);
       if (m?.[1] && m?.[2]) {
         return `https://docs.google.com/${m[1]}/d/${m[2]}/preview`;
       }
@@ -242,6 +242,27 @@ export function extractGoogleDocsPreviewUrl(rawUrl: string): string | null {
     const driveId = extractGoogleDriveFileId(rawUrl);
     if (driveId) {
       return `https://drive.google.com/file/d/${driveId}/preview`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function extractGoogleDriveDownloadUrl(rawUrl: string): string | null {
+  try {
+    const u = new URL(normalizeMediaUrl(rawUrl));
+    if (u.hostname.includes('docs.google.com')) {
+      const m = u.pathname.match(/\/(document|presentation|spreadsheets)(?:\/u\/\d+)?\/d\/([a-zA-Z0-9_-]+)/);
+      if (m?.[1] && m?.[2]) {
+        return m[1] === 'presentation'
+          ? `https://docs.google.com/presentation/d/${m[2]}/export/pdf`
+          : `https://docs.google.com/${m[1]}/d/${m[2]}/export?format=pdf`;
+      }
+    }
+    const driveId = extractGoogleDriveFileId(rawUrl);
+    if (driveId) {
+      return `https://drive.usercontent.google.com/download?id=${driveId}&export=download&confirm=t`;
     }
     return null;
   } catch {
@@ -375,11 +396,12 @@ export function triggerBrowserSave(blob: Blob, filename: string) {
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
+  a.rel = 'noopener';
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 15000);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 let cachedDirHandle: FileSystemDirectoryHandle | null = null;
@@ -542,6 +564,14 @@ export async function saveToInternalDirectoryIfPermitted(
 ): Promise<boolean> {
   const baseName = sanitizeBaseFilename(videoName);
   try {
+    if (navigator.storage?.persist) {
+      navigator.storage.persist().catch(() => {});
+    }
+  } catch {
+    // Ignore persist failure
+  }
+
+  try {
     const dirHandle = await getWritableDirectoryHandle();
     if (dirHandle) {
       if (videoBlob) {
@@ -559,11 +589,21 @@ export async function saveToInternalDirectoryIfPermitted(
       return true;
     }
   } catch {
-    // Fallback to browser download below
+    // Fallback to browser Downloads folder below
   }
 
-  if (videoBlob) triggerBrowserSave(videoBlob, `${baseName}.mp4`);
-  if (pdfBlob) triggerBrowserSave(pdfBlob, `${baseName}.pdf`);
+  if (videoBlob && pdfBlob) {
+    triggerBrowserSave(videoBlob, `${baseName}.mp4`);
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => {
+        triggerBrowserSave(pdfBlob, `${baseName}.pdf`);
+        resolve();
+      }, 700);
+    });
+  } else {
+    if (videoBlob) triggerBrowserSave(videoBlob, `${baseName}.mp4`);
+    if (pdfBlob) triggerBrowserSave(pdfBlob, `${baseName}.pdf`);
+  }
   return false;
 }
 

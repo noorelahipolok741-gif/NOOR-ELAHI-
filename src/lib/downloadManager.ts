@@ -315,6 +315,10 @@ class DownloadManager {
     const baseName = sanitizeBaseFilename(state.task.videoName || `Class_${state.task.classNumber}`);
 
     try {
+      if (typeof navigator !== 'undefined' && navigator.storage?.persist) {
+        navigator.storage.persist().catch(() => {});
+      }
+
       // Validate video link format before fetching
       if (!state.videoDone && state.task.videoUrl) {
         if (isUnsupportedVideoHost(state.task.videoUrl) || isHlsUrl(state.task.videoUrl)) {
@@ -339,67 +343,87 @@ class DownloadManager {
           });
 
           if (!res.ok && res.status !== 206) {
-            const serverMsg = await readProxyErrorMessage(
-              res,
-              `ভিডিও ডাউনলোড ব্যর্থ হয়েছে (${res.status})`,
-              state.task.videoUrl
-            );
-            throw new Error(serverMsg);
-          }
-
-          const ct = (res.headers.get('content-type') || '').toLowerCase();
-          if (ct.includes('text/html')) {
-            throw new Error('ভিডিও লিংকটি সরাসরি ডাউনলোডযোগ্য নয় (Drive এ পাবলিক এক্সেস দিন)।');
-          }
-
-          // If server ignored Range and returned 200, reset offset
-          if (res.status === 200 && state.videoDownloaded > 0) {
-            state.videoChunks = [];
-            state.videoDownloaded = 0;
-          }
-
-          const contentLenHeader = res.headers.get('content-length');
-          const contentRangeHeader = res.headers.get('content-range');
-          if (contentRangeHeader) {
-            const totalMatch = contentRangeHeader.match(/\/(\d+)$/);
-            if (totalMatch?.[1]) state.videoTotal = Number(totalMatch[1]);
-          } else if (contentLenHeader) {
-            state.videoTotal = state.videoDownloaded + Number(contentLenHeader);
-          }
-
-          state.task.totalBytes = state.videoTotal || state.task.totalBytes;
-          this.emit(true);
-
-          if (res.body) {
-            const reader = res.body.getReader();
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (value) {
-                state.videoChunks.push(value);
-                state.videoDownloaded += value.byteLength;
-                state.task.downloadedBytes = state.videoDownloaded;
-                if (state.videoTotal > 0) {
-                  const videoRatio = Math.min(1, state.videoDownloaded / state.videoTotal);
-                  state.task.progress = state.task.pdfUrl
-                    ? Math.round(videoRatio * 90)
-                    : Math.round(videoRatio * 100);
-                } else {
-                  state.task.progress = Math.min(88, Math.max(5, state.task.progress + 1));
-                }
-                this.emit(false);
+            let resolvedType = '';
+            let serverMsg = '';
+            try {
+              const rawErr = await res.text();
+              if (rawErr) {
+                const parsed = JSON.parse(rawErr) as { error?: string; resolvedType?: string };
+                resolvedType = parsed.resolvedType || '';
+                serverMsg = parsed.error || '';
               }
+            } catch {
+              // Ignore parse error
+            }
+            if ((resolvedType === 'embed' || resolvedType === 'hls') && state.task.pdfUrl) {
+              state.videoDone = true;
+            } else {
+              throw new Error(
+                serverMsg ||
+                  (res.status === 403 && extractGoogleDriveFileId(state.task.videoUrl)
+                    ? 'এই Google Drive ফাইলটি প্রাইভেট (Restricted) করা আছে। Drive-এ গিয়ে "Anyone with the link" চালু করুন।'
+                    : `ভিডিও ডাউনলোড ব্যর্থ হয়েছে (${res.status})`)
+              );
             }
           } else {
-            const buf = new Uint8Array(await res.arrayBuffer());
-            state.videoChunks.push(buf);
-            state.videoDownloaded = buf.byteLength;
-            state.task.downloadedBytes = buf.byteLength;
-            state.task.totalBytes = buf.byteLength;
-            state.task.progress = state.task.pdfUrl ? 90 : 100;
+            const ct = (res.headers.get('content-type') || '').toLowerCase();
+            if (ct.includes('text/html')) {
+              if (state.task.pdfUrl) {
+                state.videoDone = true;
+              } else {
+                throw new Error('ভিডিও লিংকটি সরাসরি ডাউনলোডযোগ্য নয় (Drive এ পাবলিক এক্সেস দিন)।');
+              }
+            } else {
+              // If server ignored Range and returned 200, reset offset
+              if (res.status === 200 && state.videoDownloaded > 0) {
+                state.videoChunks = [];
+                state.videoDownloaded = 0;
+              }
+
+              const contentLenHeader = res.headers.get('content-length');
+              const contentRangeHeader = res.headers.get('content-range');
+              if (contentRangeHeader) {
+                const totalMatch = contentRangeHeader.match(/\/(\d+)$/);
+                if (totalMatch?.[1]) state.videoTotal = Number(totalMatch[1]);
+              } else if (contentLenHeader) {
+                state.videoTotal = state.videoDownloaded + Number(contentLenHeader);
+              }
+
+              state.task.totalBytes = state.videoTotal || state.task.totalBytes;
+              this.emit(true);
+
+              if (res.body) {
+                const reader = res.body.getReader();
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  if (value) {
+                    state.videoChunks.push(value);
+                    state.videoDownloaded += value.byteLength;
+                    state.task.downloadedBytes = state.videoDownloaded;
+                    if (state.videoTotal > 0) {
+                      const videoRatio = Math.min(1, state.videoDownloaded / state.videoTotal);
+                      state.task.progress = state.task.pdfUrl
+                        ? Math.round(videoRatio * 90)
+                        : Math.round(videoRatio * 100);
+                    } else {
+                      state.task.progress = Math.min(88, Math.max(5, state.task.progress + 1));
+                    }
+                    this.emit(false);
+                  }
+                }
+              } else {
+                const buf = new Uint8Array(await res.arrayBuffer());
+                state.videoChunks.push(buf);
+                state.videoDownloaded = buf.byteLength;
+                state.task.downloadedBytes = buf.byteLength;
+                state.task.totalBytes = buf.byteLength;
+                state.task.progress = state.task.pdfUrl ? 90 : 100;
+              }
+              state.videoDone = true;
+              this.emit(true);
+            }
           }
-          state.videoDone = true;
-          this.emit(true);
         }
       }
 

@@ -7,6 +7,7 @@ import {
   Download,
   ExternalLink,
   FileText,
+  Globe,
   Loader2,
   RotateCcw,
   X,
@@ -14,9 +15,12 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import {
+  extractGoogleDocsPreviewUrl,
+  extractGoogleDriveDownloadUrl,
   extractGoogleDriveFileId,
   getOfflineMedia,
   normalizeMediaUrl,
+  resolveDownloadProxyUrl,
   resolveStreamUrl,
   sanitizeBaseFilename,
 } from '../lib/offlineStorage';
@@ -36,21 +40,26 @@ interface LoadProgress {
   total: number;
 }
 
-function startsWithPdfHeader(buf: ArrayBuffer): boolean {
-  if (buf.byteLength < 5) return false;
-  const bytes = new Uint8Array(buf, 0, Math.min(1024, buf.byteLength));
-  for (let i = 0; i <= bytes.length - 5; i++) {
-    if (
-      bytes[i] === 0x25 && // %
-      bytes[i + 1] === 0x50 && // P
-      bytes[i + 2] === 0x44 && // D
-      bytes[i + 3] === 0x46 && // F
-      bytes[i + 4] === 0x2d // -
-    ) {
-      return true;
+async function blobStartsWithPdfHeader(blob: Blob): Promise<boolean> {
+  if (blob.size < 5) return false;
+  try {
+    const slice = blob.slice(0, Math.min(2048, blob.size));
+    const bytes = new Uint8Array(await slice.arrayBuffer());
+    for (let i = 0; i <= bytes.length - 5; i++) {
+      if (
+        bytes[i] === 0x25 && // %
+        bytes[i + 1] === 0x50 && // P
+        bytes[i + 2] === 0x44 && // D
+        bytes[i + 3] === 0x46 && // F
+        bytes[i + 4] === 0x2d // -
+      ) {
+        return true;
+      }
     }
+    return false;
+  } catch {
+    return false;
   }
-  return false;
 }
 
 function formatMB(bytes: number): string {
@@ -132,7 +141,6 @@ const PdfPageCanvas: React.FC<PdfPageCanvasProps> = ({
           if (entry.isIntersecting) {
             setInView(true);
           } else if (!eager) {
-            // Keep first 3 pages cached; release far offscreen pages on huge 200+ page PDFs
             const rect = entry.boundingClientRect;
             if (Math.abs(rect.top) > 3600) {
               setInView(false);
@@ -186,7 +194,6 @@ const PdfPageCanvas: React.FC<PdfPageCanvasProps> = ({
         setDims({ width: dispW, height: dispH });
 
         const rawDpr = Math.min(window.devicePixelRatio || 1, 2.25);
-        // Cap canvas pixel area so mobile Chrome/Safari GPUs never blank out large zoomed pages
         const maxPixels = 3_800_000;
         const rawPixels = dispW * dispH * rawDpr * rawDpr;
         const safeDpr =
@@ -310,12 +317,16 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 }) => {
   const scrollWrapRef = useRef<HTMLDivElement | null>(null);
 
-  const [pdfBytes, setPdfBytes] = useState<ArrayBuffer | null>(null);
+  const [pdfBlob, setPdfBlob] = useState<Blob | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [pageCount, setPageCount] = useState(0);
   const [defaultAspect, setDefaultAspect] = useState(1.34);
   const [containerWidth, setContainerWidth] = useState<number>(computeInitialContainerWidth);
+
+  const [viewerMode, setViewerMode] = useState<'pdfjs' | 'iframe'>('pdfjs');
+  const [iframeUrl, setIframeUrl] = useState<string | null>(null);
+  const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [loadProgress, setLoadProgress] = useState<LoadProgress | null>(null);
@@ -325,7 +336,6 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   const [reloadKey, setReloadKey] = useState(0);
   const [copied, setCopied] = useState(false);
 
-  // Track responsive viewport container width cleanly so canvases are never sized against 0px
   useEffect(() => {
     if (!isOpen) return;
     const measure = () => {
@@ -349,35 +359,35 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     };
   }, [isOpen]);
 
-  // Create and clean up local same-origin Blob URL whenever pdfBytes updates
   useEffect(() => {
-    if (!pdfBytes) {
+    if (!pdfBlob) {
       setBlobUrl(null);
       return;
     }
-    const url = URL.createObjectURL(new Blob([pdfBytes], { type: 'application/pdf' }));
+    const url = URL.createObjectURL(pdfBlob);
     setBlobUrl(url);
     return () => {
       URL.revokeObjectURL(url);
     };
-  }, [pdfBytes]);
+  }, [pdfBlob]);
 
-  // Load PDF bytes completely cookie-free via IndexedDB offline blob or server-side proxy
+  // Load PDF bytes from IndexedDB offline store or server proxy, with automatic Drive/Web viewer fallback
   useEffect(() => {
     if (!isOpen) return;
     let cancelled = false;
     const controller = new AbortController();
 
-    async function readResponseBytesWithProgress(res: Response): Promise<ArrayBuffer> {
+    async function readBlobWithProgress(res: Response): Promise<Blob> {
       const totalHeader = Number(res.headers.get('content-length') || '0');
       const total = Number.isFinite(totalHeader) && totalHeader > 0 ? totalHeader : 0;
 
       if (!res.body) {
-        return res.arrayBuffer();
+        const raw = await res.blob();
+        return raw.type === 'application/pdf' ? raw : new Blob([raw], { type: 'application/pdf' });
       }
 
       const reader = res.body.getReader();
-      const chunks: Uint8Array[] = [];
+      const chunks: BlobPart[] = [];
       let loaded = 0;
       let lastEmit = 0;
 
@@ -397,29 +407,45 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       if (!cancelled) {
         setLoadProgress({ loaded, total: total || loaded });
       }
-      const combined = new Uint8Array(loaded);
-      let offset = 0;
-      for (const chunk of chunks) {
-        combined.set(chunk, offset);
-        offset += chunk.byteLength;
+      return new Blob(chunks, { type: 'application/pdf' });
+    }
+
+    function activateDriveOrWebFallback(
+      previewCandidate: string | null,
+      noticeText: string
+    ): boolean {
+      if (!previewCandidate) return false;
+      if (!cancelled) {
+        setIframeUrl(previewCandidate);
+        setViewerMode('iframe');
+        setFallbackNotice(noticeText);
+        setErrorMsg(null);
+        setLoading(false);
+        setParsingDoc(false);
       }
-      return combined.buffer;
+      return true;
     }
 
     async function loadPdfData() {
       setLoading(true);
       setLoadProgress(null);
       setErrorMsg(null);
-      setPdfBytes(null);
+      setFallbackNotice(null);
+      setViewerMode('pdfjs');
+      setIframeUrl(null);
+      setPdfBlob(null);
       setPdfDoc(null);
       setPageCount(0);
 
       try {
         const offline = await getOfflineMedia(itemId);
         if (offline?.pdfBlob && !cancelled) {
-          const buf = await offline.pdfBlob.arrayBuffer();
-          if (!cancelled && buf.byteLength > 0 && startsWithPdfHeader(buf)) {
-            setPdfBytes(buf);
+          if (await blobStartsWithPdfHeader(offline.pdfBlob)) {
+            const safeBlob =
+              offline.pdfBlob.type === 'application/pdf'
+                ? offline.pdfBlob
+                : new Blob([offline.pdfBlob], { type: 'application/pdf' });
+            setPdfBlob(safeBlob);
             setLoading(false);
             return;
           }
@@ -437,21 +463,23 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
         return;
       }
 
+      const drivePreviewCandidate = extractGoogleDocsPreviewUrl(normalized);
       const fetchTarget = resolveStreamUrl(normalized, 'pdf');
 
       try {
         const res = await fetch(fetchTarget, { signal: controller.signal });
         if (!res.ok) {
-          if (/^https?:\/\//i.test(normalized)) {
+          // Try direct browser CORS fetch before falling back
+          if (/^https?:\/\//i.test(normalized) && !extractGoogleDriveFileId(normalized)) {
             try {
               const directRes = await fetch(normalized, { signal: controller.signal });
               if (directRes.ok) {
                 const directCt = (directRes.headers.get('content-type') || '').toLowerCase();
                 if (!directCt.includes('text/html')) {
-                  const directBuf = await readResponseBytesWithProgress(directRes);
-                  if (startsWithPdfHeader(directBuf)) {
+                  const directBlob = await readBlobWithProgress(directRes);
+                  if (await blobStartsWithPdfHeader(directBlob)) {
                     if (!cancelled) {
-                      setPdfBytes(directBuf);
+                      setPdfBlob(directBlob);
                       setLoading(false);
                     }
                     return;
@@ -459,40 +487,92 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                 }
               }
             } catch {
-              // Ignore CORS or network error and report proxy message
+              // Ignore CORS/network error
             }
           }
+
           let serverMsg = '';
+          let serverPreviewUrl: string | null = null;
           try {
             const rawErr = await res.text();
             if (rawErr) {
-              const j = JSON.parse(rawErr) as { error?: string };
+              const j = JSON.parse(rawErr) as { error?: string; previewUrl?: string };
               if (j?.error) serverMsg = j.error;
+              if (j?.previewUrl) serverPreviewUrl = j.previewUrl;
             }
           } catch {
             // Ignore non-JSON error body
           }
-          if (!serverMsg && (res.status === 403 || res.status === 422) && extractGoogleDriveFileId(normalized)) {
-            serverMsg =
-              'এই Google Drive PDF ফাইলটি প্রাইভেট (Restricted) করা আছে। Google Drive-এ গিয়ে Share → "Anyone with the link" চালু করুন।';
+
+          const previewToUse = serverPreviewUrl || drivePreviewCandidate;
+          if (
+            typeof navigator !== 'undefined' &&
+            navigator.onLine &&
+            previewToUse &&
+            activateDriveOrWebFallback(
+              previewToUse,
+              'Google Drive থেকে সরাসরি বাইট লোড সীমাবদ্ধ ছিল, তাই ড্রাইভ ভিউয়ারে প্রদর্শন করা হচ্ছে।'
+            )
+          ) {
+            return;
           }
+
           throw new Error(serverMsg || `PDF লোড ব্যর্থ হয়েছে (${res.status})`);
         }
+
         const ct = (res.headers.get('content-type') || '').toLowerCase();
         if (ct.includes('text/html') || ct.includes('application/json')) {
+          if (
+            typeof navigator !== 'undefined' &&
+            navigator.onLine &&
+            drivePreviewCandidate &&
+            activateDriveOrWebFallback(
+              drivePreviewCandidate,
+              'লিংকটি Google Drive ভিউয়ারে প্রদর্শন করা হচ্ছে।'
+            )
+          ) {
+            return;
+          }
           throw new Error('এই লিংকে সরাসরি PDF পাওয়া যায়নি। লিংকটি পাবলিক শেয়ার করা আছে কিনা দেখুন।');
         }
-        const buf = await readResponseBytesWithProgress(res);
-        if (!startsWithPdfHeader(buf)) {
+
+        const fetchedBlob = await readBlobWithProgress(res);
+        if (!(await blobStartsWithPdfHeader(fetchedBlob))) {
+          if (
+            typeof navigator !== 'undefined' &&
+            navigator.onLine &&
+            drivePreviewCandidate &&
+            activateDriveOrWebFallback(
+              drivePreviewCandidate,
+              'ফাইলটি সরাসরি PDF হিসেবে পাওয়া যায়নি, তাই ড্রাইভ ভিউয়ারে খোলা হয়েছে।'
+            )
+          ) {
+            return;
+          }
           throw new Error('ফাইলটি বৈধ PDF ফরম্যাটে নেই।');
         }
+
         if (!cancelled) {
-          setPdfBytes(buf);
+          setPdfBlob(fetchedBlob);
           setLoading(false);
         }
       } catch (err) {
         if (cancelled) return;
         if ((err as { name?: string })?.name === 'AbortError') return;
+
+        // Final automatic fallback to Drive preview if online (handles 403/422/timeout/stream cut)
+        if (
+          typeof navigator !== 'undefined' &&
+          navigator.onLine &&
+          drivePreviewCandidate &&
+          activateDriveOrWebFallback(
+            drivePreviewCandidate,
+            'সরাসরি লোড করতে সময় বেশি লাগায় ফাইলটি ড্রাইভ ভিউয়ারে খোলা হয়েছে।'
+          )
+        ) {
+          return;
+        }
+
         setErrorMsg(
           err instanceof Error && err.message
             ? err.message
@@ -510,9 +590,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     };
   }, [isOpen, itemId, pdfUrl, reloadKey]);
 
-  // Parse PDFDocumentProxy deterministically with complete font/cmap/wasm support + fake-worker fallback
+  // Parse PDFDocumentProxy from Blob with fallback to Drive Preview if PDF.js fails on device
   useEffect(() => {
-    if (!isOpen || !pdfBytes) return;
+    if (!isOpen || !pdfBlob || viewerMode !== 'pdfjs') return;
     let cancelled = false;
     let activeLoadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
     let openedDoc: PDFDocumentProxy | null = null;
@@ -524,9 +604,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       setPageCount(0);
 
       const createDoc = async () => {
-        const dataCopy = new Uint8Array(pdfBytes!.slice(0));
+        const buf = await pdfBlob!.arrayBuffer();
         const task = pdfjsLib.getDocument({
-          data: dataCopy,
+          data: new Uint8Array(buf),
           standardFontDataUrl: '/pdfjs/standard_fonts/',
           cMapUrl: '/pdfjs/cmaps/',
           cMapPacked: true,
@@ -542,7 +622,6 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           doc = await createDoc();
         } catch (firstErr) {
           if (cancelled) return;
-          // Retry once with main-thread worker registration if Web Worker failed under restricted browser rules
           await ensureFakeWorkerLoadedIfNeeded();
           if (cancelled) return;
           if (activeLoadingTask) {
@@ -571,7 +650,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
             }
           }
         } catch {
-          // Keep default A4/Letter aspect ratio
+          // Keep default aspect ratio
         }
 
         if (!cancelled) {
@@ -582,6 +661,14 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       } catch {
         if (!cancelled) {
           setParsingDoc(false);
+          const normalized = normalizeMediaUrl(pdfUrl);
+          const drivePreview = extractGoogleDocsPreviewUrl(normalized);
+          if (typeof navigator !== 'undefined' && navigator.onLine && drivePreview) {
+            setIframeUrl(drivePreview);
+            setViewerMode('iframe');
+            setFallbackNotice('ডিভাইসে সরাসরি রেন্ডার না হওয়ায় ড্রাইভ ভিউয়ারে প্রদর্শন করা হচ্ছে।');
+            return;
+          }
           setErrorMsg(
             'PDF পৃষ্ঠাগুলো প্রদর্শন করা যায়নি। নিচে "মোবাইল ভিউয়ার" বা "PDF সেভ" ব্যবহার করে দেখতে পারেন।'
           );
@@ -603,18 +690,30 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
         openedDoc = null;
       }
     };
-  }, [isOpen, pdfBytes]);
+  }, [isOpen, pdfBlob, pdfUrl, viewerMode]);
 
   if (!isOpen) return null;
 
   const normalizedPdfUrl = normalizeMediaUrl(pdfUrl);
+  const downloadFilename = `${sanitizeBaseFilename(title || 'document')}.pdf`;
+  const drivePreviewCandidate = extractGoogleDocsPreviewUrl(normalizedPdfUrl);
+  const directDriveDownload = extractGoogleDriveDownloadUrl(normalizedPdfUrl);
+  const gviewFallbackUrl =
+    normalizedPdfUrl && /^https?:/i.test(normalizedPdfUrl)
+      ? `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(normalizedPdfUrl)}`
+      : null;
+
   const directExternalHref =
     typeof navigator !== 'undefined' && !navigator.onLine && blobUrl
       ? blobUrl
-      : !errorMsg && pdfBytes && normalizedPdfUrl && /^https?:/i.test(normalizedPdfUrl)
-      ? resolveStreamUrl(normalizedPdfUrl, 'pdf')
-      : normalizedPdfUrl;
-  const downloadFilename = `${sanitizeBaseFilename(title || 'document')}.pdf`;
+      : normalizedPdfUrl || (pdfBlob && blobUrl ? blobUrl : '');
+
+  const directSaveHref = blobUrl
+    ? blobUrl
+    : directDriveDownload ||
+      (normalizedPdfUrl && /^https?:/i.test(normalizedPdfUrl)
+        ? resolveDownloadProxyUrl(normalizedPdfUrl, downloadFilename, 'pdf')
+        : '');
 
   const handleCopyLink = async () => {
     if (!normalizedPdfUrl) return;
@@ -652,16 +751,18 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           <FileText className="w-5 h-5 text-emerald-400 shrink-0" />
           <div className="min-w-0">
             <h3 className="text-sm font-semibold text-white truncate">{title} — PDF</h3>
-            {pageCount > 0 && (
+            {viewerMode === 'pdfjs' && pageCount > 0 ? (
               <p className="text-[11px] font-mono-num text-slate-400">
                 মোট {pageCount} পৃষ্ঠা
               </p>
-            )}
+            ) : viewerMode === 'iframe' ? (
+              <p className="text-[11px] text-cyan-400 truncate">ড্রাইভ / অনলাইন ভিউয়ার</p>
+            ) : null}
           </div>
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
-          {pdfDoc && (
+          {viewerMode === 'pdfjs' && pdfDoc && (
             <div className="flex items-center gap-0.5 rounded-xl bg-slate-900 border border-slate-800 px-1 py-1">
               <button
                 type="button"
@@ -685,15 +786,32 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
             </div>
           )}
 
-          {blobUrl && (
+          {viewerMode === 'iframe' && (
+            <button
+              type="button"
+              onClick={() => {
+                setViewerMode('pdfjs');
+                setReloadKey((k) => k + 1);
+              }}
+              className="flex items-center gap-1 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-2 text-xs font-medium text-slate-200 transition"
+              title="সরাসরি রিলোড"
+            >
+              <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+              <span className="hidden sm:inline">রিলোড</span>
+            </button>
+          )}
+
+          {directSaveHref && (
             <a
-              href={blobUrl}
+              href={directSaveHref}
               download={downloadFilename}
+              target={blobUrl ? undefined : '_blank'}
+              rel={blobUrl ? undefined : 'noopener noreferrer'}
               className="flex items-center gap-1 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 px-2.5 py-2 text-xs font-semibold text-emerald-300 transition"
-              title="ডিভাইসে PDF সেভ করুন"
+              title="মোবাইলে PDF সেভ করুন"
             >
               <Download className="w-3.5 h-3.5 shrink-0" />
-              <span className="hidden sm:inline">সেভ</span>
+              <span>সেভ</span>
             </a>
           )}
 
@@ -720,6 +838,22 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           </button>
         </div>
       </div>
+
+      {viewerMode === 'iframe' && fallbackNotice && (
+        <div className="px-3 sm:px-4 py-2 bg-cyan-500/10 border-b border-cyan-500/25 flex items-center justify-between gap-2 text-[11px] text-cyan-200 shrink-0">
+          <span className="truncate">{fallbackNotice}</span>
+          {directExternalHref && (
+            <a
+              href={directExternalHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="shrink-0 font-bold text-cyan-300 underline"
+            >
+              বাইরে খুলুন
+            </a>
+          )}
+        </div>
+      )}
 
       <div
         ref={scrollWrapRef}
@@ -750,6 +884,13 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
               </div>
             )}
           </div>
+        ) : viewerMode === 'iframe' && iframeUrl ? (
+          <iframe
+            src={iframeUrl}
+            title={`${title} — PDF Viewer`}
+            className="w-full h-full border-0 bg-white block"
+            allow="autoplay; fullscreen"
+          />
         ) : errorMsg ? (
           <div className="h-full flex flex-col items-center justify-center p-6 text-center space-y-4">
             <p className="text-sm text-rose-200 max-w-sm leading-relaxed">{errorMsg}</p>
@@ -762,6 +903,23 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span>আবার চেষ্টা করুন</span>
               </button>
+              {(drivePreviewCandidate || gviewFallbackUrl) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = drivePreviewCandidate || gviewFallbackUrl;
+                    if (!target) return;
+                    setIframeUrl(target);
+                    setViewerMode('iframe');
+                    setErrorMsg(null);
+                    setFallbackNotice('অনলাইন ভিউয়ারে প্রদর্শন করা হচ্ছে।');
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-cyan-500 text-slate-950 text-xs font-bold flex items-center gap-1.5"
+                >
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>অনলাইন ভিউয়ার</span>
+                </button>
+              )}
               {blobUrl && (
                 <a
                   href={blobUrl}

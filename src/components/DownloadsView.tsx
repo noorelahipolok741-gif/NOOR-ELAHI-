@@ -405,7 +405,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                           onClick={async () => {
                             const ok = await exportOfflineItemToPhone(rec.itemId, rec.videoName);
                             if (ok) {
-                              setScanResultMsg(`“${rec.videoName}” আপনার ডিভাইস স্টোরেজে সেভ করা হয়েছে।`);
+                              setScanResultMsg(`“${rec.videoName}” আপনার মোবাইলের ফোল্ডার / Downloads-এ সেভ করা হয়েছে।`);
                             }
                           }}
                           className="h-9 px-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/20 text-[11px] font-semibold flex items-center gap-1 transition"

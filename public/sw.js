@@ -1,5 +1,5 @@
-const CACHE_NAME = 'noor-elahi-v11';
-const FONT_CACHE = 'noor-elahi-fonts-v11';
+const CACHE_NAME = 'noor-elahi-v12';
+const FONT_CACHE = 'noor-elahi-fonts-v12';
 
 const CORE_SHELL_ASSETS = [
   '/',

@@ -10,7 +10,10 @@ import {
 } from 'lucide-react';
 import { DownloadTask } from '../types';
 import { downloadManager } from '../lib/downloadManager';
-import { isStoragePermissionConfigured } from '../lib/offlineStorage';
+import {
+  exportOfflineItemToPhone,
+  isStoragePermissionConfigured,
+} from '../lib/offlineStorage';
 import { StoragePermissionModal } from './StoragePermissionModal';
 import { useBackOverlay } from '../hooks/useBackHandler';
 
@@ -49,6 +52,7 @@ export const LiquidDownloadBox: React.FC<LiquidDownloadBoxProps> = ({
   onOfflineAttempt,
 }) => {
   const [permModalOpen, setPermModalOpen] = useState(false);
+  const [exportedNotice, setExportedNotice] = useState(false);
   useBackOverlay(permModalOpen, () => setPermModalOpen(false), `box-storage-perm-${itemId}`);
 
   const beginDownload = () => {
@@ -67,9 +71,28 @@ export const LiquidDownloadBox: React.FC<LiquidDownloadBoxProps> = ({
 
   if (isDownloaded) {
     return (
-      <div className="w-full h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center gap-2 px-4 text-emerald-300 font-semibold text-sm select-none">
-        <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-        <span>ডাউনলোড করা আছে</span>
+      <div className="w-full flex items-center gap-2">
+        <div className="flex-1 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center gap-2 px-3 text-emerald-300 font-semibold text-xs sm:text-sm select-none min-w-0">
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+          <span className="truncate">
+            {exportedNotice ? 'ফোনে সেভ হয়েছে' : 'ডাউনলোড করা আছে'}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={async () => {
+            const ok = await exportOfflineItemToPhone(itemId, videoName || `ক্লাস ${classNumber}`);
+            if (ok) {
+              setExportedNotice(true);
+              window.setTimeout(() => setExportedNotice(false), 3000);
+            }
+          }}
+          className="h-12 px-3.5 rounded-2xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-cyan-300 font-semibold text-xs flex items-center justify-center gap-1.5 shrink-0 active:scale-95 transition"
+          title="ফোনের Downloads ফোল্ডারে সেভ করুন"
+        >
+          <Download className="w-4 h-4 shrink-0" />
+          <span>ফোনে সেভ</span>
+        </button>
       </div>
     );
   }

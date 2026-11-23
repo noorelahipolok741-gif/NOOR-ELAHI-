@@ -185,12 +185,14 @@ async function validateExternalUrl(rawUrl: string): Promise<URL> {
 }
 
 function extractFirstHttpUrl(raw: string): string {
-  const trimmed = raw.trim();
-  if (/\s/.test(trimmed)) {
-    const match = trimmed.match(/https?:\/\/[^\s<>"']+/i);
-    if (match?.[0]) return match[0];
+  const cleaned = raw.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  if (/\s/.test(cleaned)) {
+    const match = cleaned.match(/(?:https?:\/\/|drive\.google\.com\/|docs\.google\.com\/)[^\s<>"']+/i);
+    if (match?.[0]) {
+      return match[0].replace(/[.,;'">]+$/, '');
+    }
   }
-  return trimmed;
+  return cleaned;
 }
 
 function normalizeTargetUrl(rawUrl: string): string {
@@ -243,6 +245,38 @@ function normalizeTargetUrl(rawUrl: string): string {
   }
 }
 
+function isGoogleDriveFolderUrl(urlStr: string): boolean {
+  try {
+    const u = new URL(urlStr);
+    return (
+      (u.hostname.includes('drive.google.com') || u.hostname.includes('docs.google.com')) &&
+      /\/folders\//i.test(u.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function getDrivePreviewUrl(urlStr: string): string | undefined {
+  try {
+    const u = new URL(urlStr);
+    if (u.hostname.includes('docs.google.com')) {
+      const m = u.pathname.match(/\/(document|presentation|spreadsheets)(?:\/u\/\d+)?\/d\/([a-zA-Z0-9_-]+)/);
+      if (m?.[1] && m?.[2]) {
+        return `https://docs.google.com/${m[1]}/d/${m[2]}/preview`;
+      }
+    }
+    const info = extractGoogleDriveInfo(urlStr);
+    if (info?.id) {
+      const rk = info.resourceKey ? `?resourcekey=${encodeURIComponent(info.resourceKey)}` : '';
+      return `https://drive.google.com/file/d/${info.id}/preview${rk}`;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function extractGoogleDriveInfo(urlStr: string): { id: string; resourceKey?: string } | null {
   try {
     const u = new URL(urlStr);
@@ -251,7 +285,10 @@ function extractGoogleDriveInfo(urlStr: string): { id: string; resourceKey?: str
       u.hostname.includes('drive.usercontent.google.com');
     const isDocsFileHost =
       u.hostname.includes('docs.google.com') &&
-      (/\/file(?:\/u\/\d+)?\/d\//.test(u.pathname) || u.pathname === '/open' || u.pathname === '/uc');
+      (/\/file(?:\/u\/\d+)?\/d\//.test(u.pathname) ||
+        /\/a\/[^/]+\/file\/d\//.test(u.pathname) ||
+        u.pathname === '/open' ||
+        u.pathname === '/uc');
 
     if (!isDriveHost && !isDocsFileHost) {
       return null;
@@ -311,11 +348,16 @@ async function fetchWithCookieJar(
       reqHeaders['Cookie'] = cookieStr;
     }
 
-    const res = await fetch(currentUrl, { headers: reqHeaders, redirect: 'manual' });
+    const res = await fetch(currentUrl, {
+      headers: reqHeaders,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(22000),
+    });
     mergeCookiesFromResponse(cookieJar, res);
 
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get('location');
+      res.body?.cancel().catch(() => {});
       if (!loc) return { response: res, finalUrl: currentUrl };
       currentUrl = new URL(loc, currentUrl).toString();
       continue;
@@ -721,6 +763,7 @@ interface ResolvedUpstreamMedia {
   finalUrl?: string;
   hlsUrl?: string;
   embedUrl?: string;
+  previewUrl?: string;
   errorMessage?: string;
   statusCode?: number;
 }
@@ -774,31 +817,67 @@ async function resolveAndFetchMedia(
     baseHeaders['Range'] = rangeHeader;
   }
 
+  if (isGoogleDriveFolderUrl(normalized)) {
+    return {
+      kind: 'error',
+      statusCode: 422,
+      errorMessage: 'এটি Google Drive ফোল্ডারের লিংক। অনুগ্রহ করে ফোল্ডারের ভেতরের নির্দিষ্ট PDF ফাইলের লিংক কপি করে দিন।',
+    };
+  }
+
   const driveInfo = extractGoogleDriveInfo(normalized);
   if (driveInfo) {
     const rkParam = driveInfo.resourceKey
       ? `&resourcekey=${encodeURIComponent(driveInfo.resourceKey)}`
       : '';
+    const drivePreviewUrl = `https://drive.google.com/file/d/${driveInfo.id}/preview${driveInfo.resourceKey ? `?resourcekey=${encodeURIComponent(driveInfo.resourceKey)}` : ''}`;
 
     const driveUrls = [
       `https://drive.usercontent.google.com/download?id=${driveInfo.id}&export=download&confirm=t${rkParam}`,
       `https://drive.google.com/uc?export=download&id=${driveInfo.id}&confirm=t${rkParam}`,
+      `https://docs.google.com/uc?export=download&id=${driveInfo.id}&confirm=t${rkParam}`,
     ];
 
+    let blockedByPrivateAuth = false;
+
     for (const url of driveUrls) {
-      const { response: res, finalUrl } = await fetchWithCookieJar(url, baseHeaders, cookieJar);
+      let res: globalThis.Response;
+      let finalUrl: string;
+      try {
+        const fetched = await fetchWithCookieJar(url, baseHeaders, cookieJar);
+        res = fetched.response;
+        finalUrl = fetched.finalUrl;
+      } catch {
+        continue;
+      }
+
       if (finalUrl.includes('accounts.google.com')) {
         res.body?.cancel().catch(() => {});
-        return {
-          kind: 'error',
-          statusCode: 422,
-          errorMessage: 'এই Google Drive ফাইলটি প্রাইভেট (Restricted) করা আছে। Google Drive-এ গিয়ে Share → "Anyone with the link" চালু করুন।',
-        };
+        blockedByPrivateAuth = true;
+        continue;
       }
+
       const ct = (res.headers.get('content-type') || '').toLowerCase();
       if ((res.ok || res.status === 206) && !ct.includes('text/html')) {
+        if (
+          mediaKind === 'pdf' &&
+          (ct.includes('wordprocessingml') ||
+            ct.includes('presentationml') ||
+            ct.includes('spreadsheetml') ||
+            ct.includes('msword') ||
+            ct.includes('vnd.ms-'))
+        ) {
+          res.body?.cancel().catch(() => {});
+          return {
+            kind: 'error',
+            statusCode: 422,
+            previewUrl: drivePreviewUrl,
+            errorMessage: 'ফাইলটি Google Drive ভিউয়ারে প্রদর্শন করা হচ্ছে।',
+          };
+        }
         return { kind: 'stream', response: res, finalUrl };
       }
+
       if (ct.includes('text/html')) {
         const html = await readTextLimited(res);
         if (html.trimStart().startsWith('%PDF-')) {
@@ -807,53 +886,78 @@ async function resolveAndFetchMedia(
         }
         const confirmUrl = extractDriveConfirmUrlFromHtml(html, driveInfo.id, driveInfo.resourceKey);
         if (confirmUrl) {
-          const confirmed = await fetchWithCookieJar(confirmUrl, baseHeaders, cookieJar);
-          const confirmedCt = (confirmed.response.headers.get('content-type') || '').toLowerCase();
-          if ((confirmed.response.ok || confirmed.response.status === 206) && !confirmedCt.includes('text/html')) {
-            return { kind: 'stream', response: confirmed.response, finalUrl: confirmed.finalUrl };
+          try {
+            const confirmed = await fetchWithCookieJar(confirmUrl, baseHeaders, cookieJar);
+            const confirmedCt = (confirmed.response.headers.get('content-type') || '').toLowerCase();
+            if ((confirmed.response.ok || confirmed.response.status === 206) && !confirmedCt.includes('text/html')) {
+              return { kind: 'stream', response: confirmed.response, finalUrl: confirmed.finalUrl };
+            }
+            confirmed.response.body?.cancel().catch(() => {});
+          } catch {
+            // Try next Drive URL
           }
-          confirmed.response.body?.cancel().catch(() => {});
         }
       } else {
         res.body?.cancel().catch(() => {});
       }
     }
 
-    // Last-resort Google Drive video stream extraction from /view HTML (avoids cookie-asking /preview iframe!)
-    if (mediaKind !== 'pdf') {
-      const viewUrl = `https://drive.google.com/file/d/${driveInfo.id}/view${driveInfo.resourceKey ? `?resourcekey=${encodeURIComponent(driveInfo.resourceKey)}` : ''}`;
-      const viewRes = await fetchWithCookieJar(viewUrl, { 'User-Agent': DEFAULT_BROWSER_UA, Accept: 'text/html,*/*' }, cookieJar);
+    // Inspect Google Drive /view HTML as a fallback (extracts downloadUrl for PDFs or video streams for videos)
+    const viewUrl = `https://drive.google.com/file/d/${driveInfo.id}/view${driveInfo.resourceKey ? `?resourcekey=${encodeURIComponent(driveInfo.resourceKey)}` : ''}`;
+    try {
+      const viewRes = await fetchWithCookieJar(
+        viewUrl,
+        { 'User-Agent': DEFAULT_BROWSER_UA, Accept: 'text/html,*/*' },
+        cookieJar
+      );
       if (viewRes.finalUrl.includes('accounts.google.com')) {
         viewRes.response.body?.cancel().catch(() => {});
-        return {
-          kind: 'error',
-          statusCode: 422,
-          errorMessage: 'এই Google Drive ভিডিওটি প্রাইভেট (Restricted) করা আছে। Google Drive-এ গিয়ে Share → "Anyone with the link" চালু করুন।',
-        };
-      }
-      const viewHtml = await readTextLimited(viewRes.response);
-      const streamCandidates = extractDriveVideoStreamsFromViewHtml(viewHtml);
-      for (const streamUrl of streamCandidates) {
-        try {
-          const sRes = await fetchWithCookieJar(streamUrl, { ...baseHeaders, Referer: viewUrl }, cookieJar);
-          const sCt = (sRes.response.headers.get('content-type') || '').toLowerCase();
-          if ((sRes.response.ok || sRes.response.status === 206) && !sCt.includes('text/html')) {
-            return { kind: 'stream', response: sRes.response, finalUrl: sRes.finalUrl };
+        blockedByPrivateAuth = true;
+      } else {
+        const viewHtml = await readTextLimited(viewRes.response);
+        if (mediaKind === 'pdf') {
+          const dlFromView = extractDriveConfirmUrlFromHtml(viewHtml, driveInfo.id, driveInfo.resourceKey);
+          if (dlFromView) {
+            try {
+              const dlRes = await fetchWithCookieJar(dlFromView, { ...baseHeaders, Referer: viewUrl }, cookieJar);
+              const dlCt = (dlRes.response.headers.get('content-type') || '').toLowerCase();
+              if ((dlRes.response.ok || dlRes.response.status === 206) && !dlCt.includes('text/html')) {
+                return { kind: 'stream', response: dlRes.response, finalUrl: dlRes.finalUrl };
+              }
+              dlRes.response.body?.cancel().catch(() => {});
+            } catch {
+              // Fall through to previewUrl fallback
+            }
           }
-          sRes.response.body?.cancel().catch(() => {});
-        } catch {
-          // Try next stream quality candidate
+        } else {
+          const streamCandidates = extractDriveVideoStreamsFromViewHtml(viewHtml);
+          for (const streamUrl of streamCandidates) {
+            try {
+              const sRes = await fetchWithCookieJar(streamUrl, { ...baseHeaders, Referer: viewUrl }, cookieJar);
+              const sCt = (sRes.response.headers.get('content-type') || '').toLowerCase();
+              if ((sRes.response.ok || sRes.response.status === 206) && !sCt.includes('text/html')) {
+                return { kind: 'stream', response: sRes.response, finalUrl: sRes.finalUrl };
+              }
+              sRes.response.body?.cancel().catch(() => {});
+            } catch {
+              // Try next stream quality candidate
+            }
+          }
         }
       }
+    } catch {
+      // Ignore view HTML fetch failure and return previewUrl
     }
 
     return {
       kind: 'error',
       statusCode: 422,
-      errorMessage:
-        mediaKind === 'pdf'
-          ? 'Google Drive থেকে PDF ফাইলটি সরাসরি পাওয়া যায়নি। ফাইলটি "Anyone with the link (Viewer)" এবং ডাউনলোড চালু করা আছে কিনা নিশ্চিত করুন।'
-          : 'Google Drive থেকে ভিডিওটি চালু করা যায়নি। "Anyone with the link" ও ডাউনলোড অনুমতি চালু আছে কিনা দেখুন।',
+      previewUrl: drivePreviewUrl,
+      errorMessage: blockedByPrivateAuth
+        ? 'এই Google Drive ফাইলটি প্রাইভেট (Restricted) করা আছে। Google Drive-এ গিয়ে Share → "Anyone with the link" চালু করুন।'
+        : mediaKind === 'pdf'
+        ? 'Google Drive থেকে সরাসরি PDF ডাউনলোড সীমাবদ্ধ ছিল; ফাইলটি ড্রাইভ ভিউয়ারে প্রদর্শন করা হচ্ছে।'
+        : 'Google Drive থেকে ভিডিওটি চালু করা যায়নি। "Anyone with the link" ও ডাউনলোড অনুমতি চালু আছে কিনা দেখুন।',
     };
   }
 
@@ -1262,8 +1366,10 @@ async function startServer() {
       }
 
       if (resolved.kind !== 'stream' || !resolved.response) {
+        const previewUrl = resolved.previewUrl || getDrivePreviewUrl(normalizedUrl);
         res.status(resolved.statusCode || 422).json({
           error: resolved.errorMessage || 'ফাইল পাওয়া যায়নি।',
+          ...(previewUrl ? { previewUrl } : {}),
         });
         return;
       }
@@ -1272,8 +1378,10 @@ async function startServer() {
       const upstreamType = (upstream.headers.get('content-type') || '').toLowerCase();
       if (upstreamType.includes('text/html')) {
         upstream.body?.cancel().catch(() => {});
+        const previewUrl = getDrivePreviewUrl(normalizedUrl);
         res.status(422).json({
           error: 'লিংকটি সরাসরি ভিডিও বা PDF রিটার্ন করেনি।',
+          ...(previewUrl ? { previewUrl } : {}),
         });
         return;
       }
@@ -1296,11 +1404,13 @@ async function startServer() {
 
       let resolvedContentType = upstream.headers.get('content-type') || '';
       if (firstChunk && firstChunk.byteLength > 0) {
-        const headText = Buffer.from(firstChunk.subarray(0, Math.min(512, firstChunk.byteLength))).toString('utf-8').trimStart();
+        const headText = Buffer.from(firstChunk.subarray(0, Math.min(1024, firstChunk.byteLength))).toString('utf-8').trimStart();
         if (/^<!doctype\s+html|^<html[\s>]/i.test(headText)) {
           reader.cancel().catch(() => {});
+          const previewUrl = getDrivePreviewUrl(normalizedUrl);
           res.status(422).json({
             error: 'লিংকটি সরাসরি ভিডিও বা PDF রিটার্ন করেনি।',
+            ...(previewUrl ? { previewUrl } : {}),
           });
           return;
         }
@@ -1309,7 +1419,9 @@ async function startServer() {
         const isGenericMime =
           !resolvedContentType ||
           upstreamType.includes('application/octet-stream') ||
-          upstreamType.includes('binary/octet-stream');
+          upstreamType.includes('binary/octet-stream') ||
+          upstreamType.includes('application/binary') ||
+          upstreamType.includes('application/x-download');
 
         if (isPdfMagic || (isGenericMime && mediaKind === 'pdf')) {
           resolvedContentType = 'application/pdf';

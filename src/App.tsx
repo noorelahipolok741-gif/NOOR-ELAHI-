@@ -54,6 +54,7 @@ import {
 import { downloadManager } from './lib/downloadManager';
 import {
   deleteOfflineMedia,
+  exportOfflineItemToPhone,
   listOfflineMedia,
   loadAppStateBackup,
   removeAppStateBackup,
@@ -255,6 +256,10 @@ function AppContent() {
   // Notifications seen tracking & banner
   const [seenNotifIds, setSeenNotifIds] = useState<Set<string>>(() => loadSeenNotificationIds());
   const [topBanner, setTopBanner] = useState<string | null>(null);
+  const [lastCompletedDownload, setLastCompletedDownload] = useState<{
+    itemId: string;
+    name: string;
+  } | null>(null);
 
   const unreadNotifCount = useMemo(
     () => notifications.filter((n) => !seenNotifIds.has(n.id)).length,
@@ -365,12 +370,25 @@ function AppContent() {
     [pushNav]
   );
 
-  const showBanner = useCallback((msg: string) => {
-    setTopBanner(msg);
-    window.setTimeout(() => {
-      setTopBanner((curr) => (curr === msg ? null : curr));
-    }, 4000);
-  }, []);
+  const showBanner = useCallback(
+    (msg: string, completedItem?: { itemId: string; name: string }) => {
+      setTopBanner(msg);
+      if (completedItem) {
+        setLastCompletedDownload(completedItem);
+      } else {
+        setLastCompletedDownload(null);
+      }
+      window.setTimeout(() => {
+        setTopBanner((curr) => (curr === msg ? null : curr));
+        if (completedItem) {
+          setLastCompletedDownload((curr) =>
+            curr?.itemId === completedItem.itemId ? null : curr
+          );
+        }
+      }, completedItem ? 7000 : 4000);
+    },
+    []
+  );
 
   // Restore IndexedDB backup caches if localStorage was cleared + safety authReady timer
   useEffect(() => {
@@ -471,7 +489,10 @@ function AppContent() {
       setDownloadTasks(tasks);
     });
     const unsubComplete = downloadManager.onComplete(async (record) => {
-      showBanner('ডাউনলোড সম্পন্ন হয়েছে');
+      showBanner('ডাউনলোড সম্পন্ন হয়েছে · ফোনে সেভ হচ্ছে', {
+        itemId: record.itemId,
+        name: record.videoName,
+      });
       setDownloadsMap((prev) => {
         const next = { ...prev, [record.itemId]: record };
         writeLocalCache(CACHE_DOWNLOADS_KEY, next);
@@ -1569,9 +1590,25 @@ function AppContent() {
         <div className="h-[100dvh] w-full bg-[#020617] text-slate-100 flex flex-col overflow-hidden overscroll-none">
           {/* Top Notification Toast */}
           {topBanner && (
-            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] max-w-sm w-[92%] rounded-2xl bg-emerald-500 text-slate-950 px-4 py-3 shadow-2xl flex items-center gap-2.5 text-sm font-bold">
-              <CheckCircle2 className="w-5 h-5 shrink-0" />
-              <span className="truncate">{topBanner}</span>
+            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] max-w-md w-[94%] rounded-2xl bg-emerald-500 text-slate-950 px-4 py-3 shadow-2xl flex items-center justify-between gap-2.5 text-xs sm:text-sm font-bold">
+              <div className="flex items-center gap-2 min-w-0">
+                <CheckCircle2 className="w-5 h-5 shrink-0" />
+                <span className="truncate">{topBanner}</span>
+              </div>
+              {lastCompletedDownload && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const target = lastCompletedDownload;
+                    await exportOfflineItemToPhone(target.itemId, target.name);
+                    setTopBanner(null);
+                    setLastCompletedDownload(null);
+                  }}
+                  className="shrink-0 px-2.5 py-1.5 rounded-xl bg-slate-950 text-emerald-300 text-[11px] font-bold"
+                >
+                  ফোনে সেভ
+                </button>
+              )}
             </div>
           )}
 
