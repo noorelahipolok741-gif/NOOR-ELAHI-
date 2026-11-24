@@ -1,7 +1,8 @@
 export interface ClassItem {
   id: string;
   name: string;
-  videoUrl: string;
+  videoUrl?: string;
+  videoUrls?: string[];
   pdfUrl: string;
   duration?: string;
   createdAt: number;

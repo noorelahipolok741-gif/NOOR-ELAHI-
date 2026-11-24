@@ -414,11 +414,7 @@ export function supportsDirectoryPicker(): boolean {
 }
 
 export function isStoragePermissionConfigured(): boolean {
-  try {
-    return Boolean(cachedDirHandle) || localStorage.getItem(STORAGE_PERM_KEY) === 'granted';
-  } catch {
-    return Boolean(cachedDirHandle);
-  }
+  return true;
 }
 
 export async function getStoragePermissionStatus(): Promise<StoragePermissionStatus> {
@@ -715,7 +711,7 @@ export async function scanAndRestoreFilesFromDevice(
             sectionTitle: section.title,
             classNumber: classIndex,
             videoName: item.name,
-            videoUrl: item.videoUrl,
+            videoUrl: item.videoUrl || '',
             pdfUrl: item.pdfUrl,
             videoBlob: matchedVideo,
             pdfBlob: matchedPdf,
@@ -731,7 +727,7 @@ export async function scanAndRestoreFilesFromDevice(
             sectionTitle: section.title,
             classNumber: classIndex,
             videoName: item.name,
-            videoUrl: item.videoUrl,
+            videoUrl: item.videoUrl || '',
             pdfUrl: item.pdfUrl,
             fileSizeBytes: totalBytes,
             hasLocalVideo: !!matchedVideo,

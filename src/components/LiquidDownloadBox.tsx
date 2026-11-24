@@ -10,12 +10,7 @@ import {
 } from 'lucide-react';
 import { DownloadTask } from '../types';
 import { downloadManager } from '../lib/downloadManager';
-import {
-  exportOfflineItemToPhone,
-  isStoragePermissionConfigured,
-} from '../lib/offlineStorage';
-import { StoragePermissionModal } from './StoragePermissionModal';
-import { useBackOverlay } from '../hooks/useBackHandler';
+import { exportOfflineItemToPhone } from '../lib/offlineStorage';
 
 interface LiquidDownloadBoxProps {
   itemId: string;
@@ -51,9 +46,7 @@ export const LiquidDownloadBox: React.FC<LiquidDownloadBoxProps> = ({
   isOnline,
   onOfflineAttempt,
 }) => {
-  const [permModalOpen, setPermModalOpen] = useState(false);
   const [exportedNotice, setExportedNotice] = useState(false);
-  useBackOverlay(permModalOpen, () => setPermModalOpen(false), `box-storage-perm-${itemId}`);
 
   const beginDownload = () => {
     downloadManager.startDownload({
@@ -194,35 +187,20 @@ export const LiquidDownloadBox: React.FC<LiquidDownloadBoxProps> = ({
   }
 
   return (
-    <>
-      <button
-        type="button"
-        onClick={() => {
-          if (!isOnline) {
-            onOfflineAttempt?.();
-            return;
-          }
-          if (!isStoragePermissionConfigured()) {
-            setPermModalOpen(true);
-            return;
-          }
-          beginDownload();
-        }}
-        className="group relative w-full h-12 rounded-2xl bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border border-cyan-500/30 hover:border-cyan-400/60 overflow-hidden flex items-center justify-center gap-2 px-4 text-sm font-semibold text-cyan-200 transition active:scale-[0.98]"
-      >
-        <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/10 via-cyan-500/15 to-blue-500/10 opacity-70 group-hover:opacity-100 transition-opacity" />
-        <Download className="relative z-10 w-4 h-4 text-cyan-400 shrink-0" />
-        <span className="relative z-10">ডাউনলোড</span>
-      </button>
-
-      <StoragePermissionModal
-        isOpen={permModalOpen}
-        onClose={() => setPermModalOpen(false)}
-        onGranted={() => {
-          setPermModalOpen(false);
-          beginDownload();
-        }}
-      />
-    </>
+    <button
+      type="button"
+      onClick={() => {
+        if (!isOnline) {
+          onOfflineAttempt?.();
+          return;
+        }
+        beginDownload();
+      }}
+      className="group relative w-full h-12 rounded-2xl bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border border-cyan-500/30 hover:border-cyan-400/60 overflow-hidden flex items-center justify-center gap-2 px-4 text-sm font-semibold text-cyan-200 transition active:scale-[0.98]"
+    >
+      <div className="absolute inset-0 bg-gradient-to-r from-emerald-500/10 via-cyan-500/15 to-blue-500/10 opacity-70 group-hover:opacity-100 transition-opacity" />
+      <Download className="relative z-10 w-4 h-4 text-cyan-400 shrink-0" />
+      <span className="relative z-10">ডাউনলোড</span>
+    </button>
   );
 };

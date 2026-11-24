@@ -296,6 +296,29 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
     );
   };
 
+  const updateVideoUrlIndex = (sectionId: string, itemId: string, vIdx: number, val: string) => {
+    setDraftSections((prev) =>
+      prev.map((sec) =>
+        sec.id === sectionId
+          ? {
+              ...sec,
+              items: sec.items.map((it) => {
+                if (it.id !== itemId) return it;
+                const existingUrls = it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                while (existingUrls.length <= vIdx) existingUrls.push('');
+                existingUrls[vIdx] = val;
+                return {
+                  ...it,
+                  videoUrl: existingUrls[0] || '',
+                  videoUrls: existingUrls.filter(Boolean),
+                };
+              }),
+            }
+          : sec
+      )
+    );
+  };
+
   const handleSave = async () => {
     if (!editingSubjectId) return;
     const meta = SUBJECT_LIST.find((s) => s.id === editingSubjectId);
@@ -307,13 +330,18 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
     try {
       const normalizedSections: SubjectSection[] = draftSections.map((sec) => ({
         ...sec,
-        items: (sec.items || []).map((it) => ({
-          ...it,
-          name: it.name.trim(),
-          duration: (it.duration || '').trim(),
-          videoUrl: it.videoUrl.trim() ? normalizeMediaUrl(it.videoUrl) : '',
-          pdfUrl: it.pdfUrl.trim() ? normalizeMediaUrl(it.pdfUrl) : '',
-        })),
+        items: (sec.items || []).map((it) => {
+          const rawUrls = it.videoUrls && it.videoUrls.length > 0 ? it.videoUrls : [it.videoUrl || ''];
+          const normalizedVideoUrls = rawUrls.map((u) => (u?.trim() ? normalizeMediaUrl(u) : '')).filter(Boolean);
+          return {
+            ...it,
+            name: it.name.trim(),
+            duration: (it.duration || '').trim(),
+            videoUrl: normalizedVideoUrls[0] || '',
+            videoUrls: normalizedVideoUrls,
+            pdfUrl: it.pdfUrl.trim() ? normalizeMediaUrl(it.pdfUrl) : '',
+          };
+        }),
       }));
 
       const prevDoc = subjects[editingSubjectId];
@@ -328,8 +356,8 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
       for (const sec of normalizedSections) {
         for (const it of sec.items) {
           const prev = prevItemMap.get(it.id);
-          const nowHasMedia = Boolean(it.videoUrl.trim() || it.pdfUrl.trim());
-          const prevHadMedia = Boolean(prev?.videoUrl?.trim() || prev?.pdfUrl?.trim());
+          const nowHasMedia = Boolean(it.videoUrl?.trim() || (it.videoUrls && it.videoUrls.some(u => u.trim())) || it.pdfUrl?.trim());
+          const prevHadMedia = Boolean(prev?.videoUrl?.trim() || (prev?.videoUrls && prev.videoUrls.some(u => u.trim())) || prev?.pdfUrl?.trim());
           if (nowHasMedia && !prevHadMedia) {
             addedItems.push({
               sectionTitle: sec.title.trim() || meta.name,
@@ -539,7 +567,9 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                 </div>
 
                 <div className="space-y-3 pt-1">
-                  {section.items.map((item, iIdx) => (
+                  {section.items.map((item, iIdx) => {
+                    const itemVideoUrls = item.videoUrls && item.videoUrls.length > 0 ? item.videoUrls : [item.videoUrl || ''];
+                    return (
                     <div
                       key={item.id}
                       className="rounded-2xl bg-slate-950 border border-slate-800 p-3.5 space-y-2.5"
@@ -575,16 +605,36 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                         </button>
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                        <input
-                          type="url"
-                          value={item.videoUrl}
-                          onChange={(e) =>
-                            updateSlotField(section.id, item.id, 'videoUrl', e.target.value)
-                          }
-                          placeholder="ভিডিওর লিংক (Drive / .m3u8 / MP4)"
-                          className="w-full h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
-                        />
+                      <div className="space-y-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <input
+                            type="url"
+                            value={itemVideoUrls[0] || ''}
+                            onChange={(e) =>
+                              updateVideoUrlIndex(section.id, item.id, 0, e.target.value)
+                            }
+                            placeholder="ভিডিও লিংক ১ (Part 1)"
+                            className="w-full h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
+                          />
+                          <input
+                            type="url"
+                            value={itemVideoUrls[1] || ''}
+                            onChange={(e) =>
+                              updateVideoUrlIndex(section.id, item.id, 1, e.target.value)
+                            }
+                            placeholder="ভিডিও লিংক ২ (Part 2, optional)"
+                            className="w-full h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
+                          />
+                          <input
+                            type="url"
+                            value={itemVideoUrls[2] || ''}
+                            onChange={(e) =>
+                              updateVideoUrlIndex(section.id, item.id, 2, e.target.value)
+                            }
+                            placeholder="ভিডিও লিংক ৩ (Part 3, optional)"
+                            className="w-full h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
+                          />
+                        </div>
                         <input
                           type="url"
                           value={item.pdfUrl}
@@ -596,7 +646,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                         />
                       </div>
                     </div>
-                  ))}
+                  );})}
                 </div>
               </div>
             ))}

@@ -176,7 +176,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
         className="hidden"
       />
 
-      {/* Storage Permission & Scan Header Card */}
+      {/* Storage & Scan Header Card */}
       <div className="rounded-3xl bg-slate-900/80 border border-slate-800 p-4 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="space-y-0.5">
@@ -188,35 +188,12 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={() => setPermModalOpen(true)}
-              className={`h-10 px-3.5 rounded-2xl border font-semibold text-xs flex items-center gap-1.5 transition ${
-                permStatus?.configured
-                  ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
-                  : 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-              }`}
-            >
-              {permStatus?.configured ? (
-                <ShieldCheck className="w-4 h-4 shrink-0" />
-              ) : (
-                <HardDrive className="w-4 h-4 shrink-0" />
-              )}
-              <span>
-                {permStatus?.hasFolderAccess && permStatus.folderName
-                  ? `ফোল্ডার: ${permStatus.folderName}`
-                  : permStatus?.configured
-                  ? 'স্টোরেজ অনুমতি সক্রিয়'
-                  : 'স্টোরেজ অনুমতি দিন'}
-              </span>
-            </button>
-
-            <button
-              type="button"
               disabled={scanning}
               onClick={() => setShowScanPrompt(true)}
-              className="h-10 px-3.5 rounded-2xl bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 border border-emerald-500/40 text-emerald-300 font-semibold text-xs flex items-center justify-center gap-1.5 hover:border-emerald-400 transition shrink-0"
+              className="h-10 px-4 rounded-2xl bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 border border-emerald-500/40 text-emerald-300 font-semibold text-xs flex items-center justify-center gap-1.5 hover:border-emerald-400 transition shrink-0"
             >
               <FolderSearch className="w-4 h-4 shrink-0" />
-              <span>{scanning ? 'স্ক্যান হচ্ছে...' : 'ফাইল ও মিডিয়া স্ক্যান করুন'}</span>
+              <span>{scanning ? 'স্ক্যান হচ্ছে...' : 'মোবাইল স্টোরেজ স্ক্যান করুন'}</span>
             </button>
           </div>
         </div>

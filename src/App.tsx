@@ -649,6 +649,15 @@ function AppContent() {
         setAppUser((curr) => curr || fallbackUser);
         setAuthReady(true);
 
+        // Automatically request persistent storage permission on first login/launch
+        try {
+          if (navigator.storage?.persist) {
+            navigator.storage.persist().catch(() => {});
+          }
+        } catch {
+          // Ignore
+        }
+
         const userDocRef = doc(db, 'users', fbUser.uid);
         try {
           const snap = await Promise.race([
@@ -1837,7 +1846,7 @@ function AppContent() {
               sectionTitle={activeVideo.sectionTitle}
               classNumber={activeVideo.classNumber}
               videoName={activeVideo.item.name}
-              videoUrl={activeVideo.item.videoUrl}
+              videoUrl={activeVideo.item.videoUrl || ''}
               pdfUrl={activeVideo.item.pdfUrl}
               durationLabel={activeVideo.item.duration}
               initialPosition={progressMap[activeVideo.item.id]?.currentTime || 0}
