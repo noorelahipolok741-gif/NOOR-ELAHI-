@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   BookOpen,
   Calculator,
+  CheckCircle2,
   ChevronRight,
   Cpu,
   FileText,
@@ -420,9 +421,21 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
                     {items.map((item, itemIdx) => {
                       const currentClassNum = itemIdx + 1;
-                      const hasVideo = Boolean(item.videoUrl?.trim());
+                      const videoLinks = (item.videoUrls && item.videoUrls.length > 0)
+                        ? item.videoUrls.filter(Boolean)
+                        : (item.videoUrl?.trim() ? [item.videoUrl.trim()] : []);
+                      const hasVideo = videoLinks.length > 0;
                       const hasPdf = Boolean(item.pdfUrl?.trim());
-                      const isDownloaded = Boolean(downloads[item.id]);
+
+                      const rec = downloads[item.id];
+                      const hasDownloadedVideo = Boolean(rec && rec.hasLocalVideo);
+                      const hasDownloadedPdf = Boolean(rec && rec.hasLocalPdf);
+                      const isDownloaded = Boolean(
+                        rec &&
+                        (!hasVideo || hasDownloadedVideo) &&
+                        (!hasPdf || hasDownloadedPdf)
+                      );
+
                       const activeTask = downloadTasks[item.id];
                       const displayName = item.name?.trim() || `ক্লাস ${currentClassNum}`;
 
@@ -481,10 +494,13 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                                           classNumber: currentClassNum,
                                         });
                                       }}
-                                      className="flex-1 h-12 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/15 active:scale-[0.98] transition"
+                                      className="flex-1 h-12 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/15 active:scale-[0.98] transition relative"
                                     >
                                       <Play className="w-4 h-4 fill-current shrink-0" />
                                       <span>দেখুন</span>
+                                      {hasDownloadedVideo && (
+                                        <CheckCircle2 className="w-4 h-4 text-slate-950 shrink-0 ml-0.5" />
+                                      )}
                                     </button>
                                   );
                                 }

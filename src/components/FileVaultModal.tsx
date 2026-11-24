@@ -319,6 +319,48 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
     );
   };
 
+  const addVideoUrlField = (sectionId: string, itemId: string) => {
+    setDraftSections((prev) =>
+      prev.map((sec) =>
+        sec.id === sectionId
+          ? {
+              ...sec,
+              items: sec.items.map((it) => {
+                if (it.id !== itemId) return it;
+                const existingUrls = it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                return {
+                  ...it,
+                  videoUrls: [...existingUrls, ''],
+                };
+              }),
+            }
+          : sec
+      )
+    );
+  };
+
+  const removeVideoUrlIndex = (sectionId: string, itemId: string, vIdx: number) => {
+    setDraftSections((prev) =>
+      prev.map((sec) =>
+        sec.id === sectionId
+          ? {
+              ...sec,
+              items: sec.items.map((it) => {
+                if (it.id !== itemId) return it;
+                const existingUrls = it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                const nextUrls = existingUrls.filter((_, idx) => idx !== vIdx);
+                return {
+                  ...it,
+                  videoUrl: nextUrls[0] || '',
+                  videoUrls: nextUrls.length > 0 ? nextUrls : [''],
+                };
+              }),
+            }
+          : sec
+      )
+    );
+  };
+
   const handleSave = async () => {
     if (!editingSubjectId) return;
     const meta = SUBJECT_LIST.find((s) => s.id === editingSubjectId);
@@ -606,35 +648,38 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                       </div>
 
                       <div className="space-y-2">
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                          <input
-                            type="url"
-                            value={itemVideoUrls[0] || ''}
-                            onChange={(e) =>
-                              updateVideoUrlIndex(section.id, item.id, 0, e.target.value)
-                            }
-                            placeholder="ভিডিও লিংক ১ (Part 1)"
-                            className="w-full h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
-                          />
-                          <input
-                            type="url"
-                            value={itemVideoUrls[1] || ''}
-                            onChange={(e) =>
-                              updateVideoUrlIndex(section.id, item.id, 1, e.target.value)
-                            }
-                            placeholder="ভিডিও লিংক ২ (Part 2, optional)"
-                            className="w-full h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
-                          />
-                          <input
-                            type="url"
-                            value={itemVideoUrls[2] || ''}
-                            onChange={(e) =>
-                              updateVideoUrlIndex(section.id, item.id, 2, e.target.value)
-                            }
-                            placeholder="ভিডিও লিংক ৩ (Part 3, optional)"
-                            className="w-full h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
-                          />
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold text-emerald-400">ভিডিও লিংকসমূহ (পার্ট অনুযায়ী)</span>
+                          <button
+                            type="button"
+                            onClick={() => addVideoUrlField(section.id, item.id)}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/35 text-emerald-300 text-xs font-bold flex items-center gap-1 hover:bg-emerald-500/30 transition"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>ভিডিও লিংক যোগ করুন (+)</span>
+                          </button>
                         </div>
+                        {itemVideoUrls.map((vUrl, vIdx) => (
+                          <div key={vIdx} className="flex items-center gap-2">
+                            <input
+                              type="url"
+                              value={vUrl}
+                              onChange={(e) => updateVideoUrlIndex(section.id, item.id, vIdx, e.target.value)}
+                              placeholder={`ভিডিও লিংক পার্ট ${vIdx + 1} (Drive / MP4)`}
+                              className="flex-1 h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
+                            />
+                            {itemVideoUrls.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => removeVideoUrlIndex(section.id, item.id, vIdx)}
+                                className="p-2.5 rounded-xl bg-slate-900 text-rose-400 hover:bg-rose-500/15"
+                                title="এই ভিডিও লিংকটি মুছুন"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        ))}
                         <input
                           type="url"
                           value={item.pdfUrl}
