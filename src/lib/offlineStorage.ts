@@ -815,10 +815,110 @@ function normalizeMatchName(raw: string): string {
   return raw
     .normalize('NFC')
     .replace(/\.[^/.]+$/, '')
+    .replace(/\(\s*\d+\s*\)/g, ' ')
+    .replace(/\b(?:1080p|720p|480p|360p|240p|hd|mp4|pdf|copy)\b/gi, ' ')
     .replace(/[_\-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+function findBestMatchingFile(targetNorm: string, fileMap: Map<string, File>): File | undefined {
+  if (!targetNorm) return undefined;
+  const exact = fileMap.get(targetNorm);
+  if (exact) return exact;
+
+  const targetTokens = targetNorm.split(' ').filter((t) => t.length >= 1);
+  let bestFile: File | undefined;
+  let bestScore = 0;
+
+  for (const [fileNorm, file] of fileMap.entries()) {
+    if (fileNorm.length >= 4 && targetNorm.length >= 4) {
+      if (fileNorm.includes(targetNorm) || targetNorm.includes(fileNorm)) {
+        const lenDiff = Math.abs(fileNorm.length - targetNorm.length);
+        const score = 0.9 - Math.min(0.25, lenDiff / 100);
+        if (score > bestScore) {
+          bestScore = score;
+          bestFile = file;
+        }
+        continue;
+      }
+    }
+
+    if (targetTokens.length >= 2) {
+      const fileTokens = new Set(fileNorm.split(' ').filter((t) => t.length >= 1));
+      let matched = 0;
+      for (const tok of targetTokens) {
+        if (fileTokens.has(tok)) matched += 1;
+      }
+      const ratio = matched / targetTokens.length;
+      if (ratio >= 0.7 && ratio > bestScore) {
+        bestScore = ratio;
+        bestFile = file;
+      }
+    }
+  }
+
+  return bestScore >= 0.65 ? bestFile : undefined;
+}
+
+export async function saveOfflineBlobForClass(params: {
+  itemId: string;
+  subjectId?: string;
+  sectionId?: string;
+  sectionTitle?: string;
+  classNumber?: number;
+  videoName: string;
+  videoUrl?: string;
+  pdfUrl?: string;
+  videoBlob?: Blob;
+  pdfBlob?: Blob;
+}): Promise<OfflineMediaEntry> {
+  const existing = await getOfflineMedia(params.itemId).catch(() => null);
+  const nextVideoBlob = params.videoBlob || existing?.videoBlob;
+  const nextPdfBlob = params.pdfBlob || existing?.pdfBlob;
+  const totalBytes = (nextVideoBlob?.size || 0) + (nextPdfBlob?.size || 0);
+
+  const entry: OfflineMediaEntry = {
+    itemId: params.itemId,
+    subjectId: params.subjectId || existing?.subjectId || '',
+    sectionId: params.sectionId || existing?.sectionId || '',
+    sectionTitle: params.sectionTitle || existing?.sectionTitle || '',
+    classNumber: params.classNumber || existing?.classNumber || 1,
+    videoName: params.videoName || existing?.videoName || 'ক্লাস',
+    videoUrl: params.videoUrl ?? existing?.videoUrl ?? '',
+    pdfUrl: params.pdfUrl ?? existing?.pdfUrl ?? '',
+    videoBlob: nextVideoBlob,
+    pdfBlob: nextPdfBlob,
+    fileSizeBytes: totalBytes,
+    savedAt: Date.now(),
+  };
+
+  await saveOfflineMedia(entry);
+  return entry;
+}
+
+export async function tryAutoRescanGrantedDirectory(
+  subjects: Record<string, SubjectDoc>,
+  uid: string
+): Promise<DownloadRecord[]> {
+  try {
+    const handle = cachedDirHandle || (await loadDirHandleFromDB());
+    if (!handle) return [];
+    const h = handle as unknown as {
+      queryPermission?: (desc: { mode: 'read' | 'readwrite' }) => Promise<PermissionState>;
+    };
+    if (h.queryPermission) {
+      const state = await h.queryPermission({ mode: 'read' });
+      if (state !== 'granted') return [];
+    }
+    const files = await collectFilesFromDirectoryHandle(handle);
+    if (files.length === 0) return [];
+    const { matchedRecords } = await scanAndRestoreFilesFromDevice(files, subjects, uid);
+    return matchedRecords;
+  } catch {
+    return [];
+  }
 }
 
 export async function scanAndRestoreFilesFromDevice(
@@ -853,29 +953,30 @@ export async function scanAndRestoreFilesFromDevice(
     for (const section of subject.sections || []) {
       let classIndex = 0;
       for (const item of section.items || []) {
-        if (!item.videoUrl && !item.pdfUrl) continue;
+        const primaryVideoUrl =
+          (item.videoUrls && item.videoUrls.find((u) => Boolean(u?.trim()))) ||
+          item.videoUrl ||
+          '';
+        if (!primaryVideoUrl && !item.pdfUrl) continue;
         classIndex += 1;
         const targetNorm = normalizeMatchName(item.name);
         if (!targetNorm) continue;
 
-        const matchedVideo = videoMap.get(targetNorm);
-        const matchedPdf = pdfMap.get(targetNorm);
+        const matchedVideo = findBestMatchingFile(targetNorm, videoMap);
+        const matchedPdf = findBestMatchingFile(targetNorm, pdfMap);
 
         if (matchedVideo || matchedPdf) {
-          const totalBytes = (matchedVideo?.size || 0) + (matchedPdf?.size || 0);
-          await saveOfflineMedia({
+          const entry = await saveOfflineBlobForClass({
             itemId: item.id,
             subjectId: subject.id,
             sectionId: section.id,
             sectionTitle: section.title,
             classNumber: classIndex,
             videoName: item.name,
-            videoUrl: item.videoUrl || '',
+            videoUrl: primaryVideoUrl,
             pdfUrl: item.pdfUrl,
             videoBlob: matchedVideo,
             pdfBlob: matchedPdf,
-            fileSizeBytes: totalBytes,
-            savedAt: Date.now(),
           });
 
           matchedRecords.push({
@@ -886,11 +987,11 @@ export async function scanAndRestoreFilesFromDevice(
             sectionTitle: section.title,
             classNumber: classIndex,
             videoName: item.name,
-            videoUrl: item.videoUrl || '',
+            videoUrl: primaryVideoUrl,
             pdfUrl: item.pdfUrl,
-            fileSizeBytes: totalBytes,
-            hasLocalVideo: !!matchedVideo,
-            hasLocalPdf: !!matchedPdf,
+            fileSizeBytes: entry.fileSizeBytes,
+            hasLocalVideo: !!entry.videoBlob,
+            hasLocalPdf: !!entry.pdfBlob,
           });
         }
       }

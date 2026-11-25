@@ -25,7 +25,7 @@ import {
   Bell,
   BookOpen,
   CheckCircle2,
-  Download,
+  FolderSearch,
   User as UserIcon,
   WifiOff,
   X,
@@ -35,10 +35,8 @@ import {
   AppUser,
   ClassItem,
   DownloadRecord,
-  DownloadTask,
   InboxMessage,
   isAdminEmail,
-  SUBJECT_LIST,
   SubjectDoc,
   WatchProgress,
 } from './types';
@@ -51,14 +49,14 @@ import {
   sha256Hex,
   testConnection,
 } from './lib/firebase';
-import { downloadManager } from './lib/downloadManager';
 import {
-  deleteOfflineMedia,
-  exportOfflineItemToPhone,
   listOfflineMedia,
   loadAppStateBackup,
   removeAppStateBackup,
   saveAppStateBackup,
+  saveOfflineBlobForClass,
+  scanAndRestoreFilesFromDevice,
+  tryAutoRescanGrantedDirectory,
 } from './lib/offlineStorage';
 import {
   formatNotificationRemainingLabel,
@@ -70,8 +68,7 @@ import {
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthSuitcaseScreen } from './components/AuthSuitcaseScreen';
-import { SubjectsView } from './components/SubjectsView';
-import { DownloadsView } from './components/DownloadsView';
+import { OfflineTargetPayload, SubjectsView } from './components/SubjectsView';
 import { ProfileView } from './components/ProfileView';
 import { PlyrVideoPlayer } from './components/PlyrVideoPlayer';
 import { PdfViewerModal } from './components/PdfViewerModal';
@@ -79,7 +76,7 @@ import { FileVaultModal } from './components/FileVaultModal';
 import { AdminInboxModal } from './components/AdminInboxModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
 
-type ActiveTab = 'subjects' | 'downloads' | 'profile';
+type ActiveTab = 'subjects' | 'profile';
 
 interface ActiveVideoState {
   item: ClassItem;
@@ -98,7 +95,6 @@ interface ActivePdfState {
 interface NavState {
   activeTab: ActiveTab;
   subjectId: string | null;
-  downloadSubjectId: string | null;
   vaultOpen: boolean;
   vaultSubjectId: string | null;
   inboxOpen: boolean;
@@ -112,7 +108,6 @@ interface NavState {
 const ROOT_NAV: NavState = {
   activeTab: 'subjects',
   subjectId: null,
-  downloadSubjectId: null,
   vaultOpen: false,
   vaultSubjectId: null,
   inboxOpen: false,
@@ -127,7 +122,6 @@ function isSameNav(a: NavState, b: NavState): boolean {
   return (
     a.activeTab === b.activeTab &&
     a.subjectId === b.subjectId &&
-    a.downloadSubjectId === b.downloadSubjectId &&
     a.vaultOpen === b.vaultOpen &&
     a.vaultSubjectId === b.vaultSubjectId &&
     a.inboxOpen === b.inboxOpen &&
@@ -216,7 +210,6 @@ function AppContent() {
   const {
     activeTab,
     subjectId: selectedSubjectId,
-    downloadSubjectId: selectedDownloadSubjectId,
     vaultOpen,
     vaultSubjectId,
     inboxOpen,
@@ -239,7 +232,6 @@ function AppContent() {
   const [downloadsMap, setDownloadsMap] = useState<Record<string, DownloadRecord>>(() =>
     readLocalCache<Record<string, DownloadRecord>>(CACHE_DOWNLOADS_KEY, {})
   );
-  const [downloadTasks, setDownloadTasks] = useState<Record<string, DownloadTask>>({});
 
   // Admin state
   const [vaultHash, setVaultHash] = useState<string | null>(() => {
@@ -256,10 +248,8 @@ function AppContent() {
   // Notifications seen tracking & banner
   const [seenNotifIds, setSeenNotifIds] = useState<Set<string>>(() => loadSeenNotificationIds());
   const [topBanner, setTopBanner] = useState<string | null>(null);
-  const [lastCompletedDownload, setLastCompletedDownload] = useState<{
-    itemId: string;
-    name: string;
-  } | null>(null);
+  const [pendingOfflineTarget, setPendingOfflineTarget] = useState<OfflineTargetPayload | null>(null);
+  const offlineFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const unreadNotifCount = useMemo(
     () => notifications.filter((n) => !seenNotifIds.has(n.id)).length,
@@ -359,9 +349,6 @@ function AppContent() {
           if (tab === 'subjects' && prev.subjectId !== null) {
             return { ...prev, subjectId: null };
           }
-          if (tab === 'downloads' && prev.downloadSubjectId !== null) {
-            return { ...prev, downloadSubjectId: null };
-          }
           return prev;
         }
         return { ...prev, activeTab: tab };
@@ -370,25 +357,12 @@ function AppContent() {
     [pushNav]
   );
 
-  const showBanner = useCallback(
-    (msg: string, completedItem?: { itemId: string; name: string }) => {
-      setTopBanner(msg);
-      if (completedItem) {
-        setLastCompletedDownload(completedItem);
-      } else {
-        setLastCompletedDownload(null);
-      }
-      window.setTimeout(() => {
-        setTopBanner((curr) => (curr === msg ? null : curr));
-        if (completedItem) {
-          setLastCompletedDownload((curr) =>
-            curr?.itemId === completedItem.itemId ? null : curr
-          );
-        }
-      }, completedItem ? 7000 : 4000);
-    },
-    []
-  );
+  const showBanner = useCallback((msg: string) => {
+    setTopBanner(msg);
+    window.setTimeout(() => {
+      setTopBanner((curr) => (curr === msg ? null : curr));
+    }, 4000);
+  }, []);
 
   // Restore IndexedDB backup caches if localStorage was cleared + safety authReady timer
   useEffect(() => {
@@ -412,7 +386,6 @@ function AppContent() {
         if (active && backedUpUser) {
           setAppUser((curr) => curr || backedUpUser);
           writeLocalCache(CACHE_USER_KEY, backedUpUser);
-          downloadManager.setUid(backedUpUser.uid);
           setAuthReady(true);
         }
       }
@@ -483,59 +456,38 @@ function AppContent() {
     };
   }, []);
 
-  // Subscribe to downloadManager progress & completion
+  // Auto-rescan previously granted device download directory when returning from external Drive/browser
   useEffect(() => {
-    const unsubSnap = downloadManager.subscribe((tasks) => {
-      setDownloadTasks(tasks);
-    });
-    const unsubComplete = downloadManager.onComplete(async (record) => {
-      showBanner('ডাউনলোড সম্পন্ন হয়েছে · ফোনে সেভ হচ্ছে', {
-        itemId: record.itemId,
-        name: record.videoName,
-      });
-      setDownloadsMap((prev) => {
-        const next = { ...prev, [record.itemId]: record };
-        writeLocalCache(CACHE_DOWNLOADS_KEY, next);
-        return next;
-      });
+    if (!appUser || Object.keys(subjects).length === 0) return;
 
-      if (appUser) {
-        if (appUser.authMode === 'google' && firebaseUser) {
-          const path = `users/${firebaseUser.uid}/downloads`;
-          const docPayload = {
-            uid: firebaseUser.uid,
-            itemId: record.itemId,
-            subjectId: record.subjectId,
-            sectionId: record.sectionId,
-            sectionTitle: (record.sectionTitle || 'ক্লাস').slice(0, 160),
-            classNumber: Math.max(1, Number(record.classNumber) || 1),
-            videoName: (record.videoName || 'ক্লাস').slice(0, 200),
-            videoUrl: (record.videoUrl || '').slice(0, 1000),
-            pdfUrl: (record.pdfUrl || '').slice(0, 1000),
-            fileSizeBytes: Math.max(0, Number(record.fileSizeBytes) || 0),
-            downloadedAt: serverTimestamp(),
-          };
-          setDoc(doc(db, path, record.itemId), docPayload).catch((err) => {
-            handleListenerErrorSafe(err, OperationType.WRITE, `${path}/${record.itemId}`);
+    const runAutoRescan = async () => {
+      try {
+        const matched = await tryAutoRescanGrantedDirectory(subjects, appUser.uid);
+        if (matched.length > 0) {
+          setDownloadsMap((prev) => {
+            const next = { ...prev };
+            for (const r of matched) {
+              next[r.itemId] = r;
+            }
+            writeLocalCache(CACHE_DOWNLOADS_KEY, next);
+            return next;
           });
-        } else if (appUser.authMode === 'number' && appUser.bearerToken) {
-          fetch('/api/number-user/state', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${appUser.bearerToken}`,
-            },
-            body: JSON.stringify({ downloadItem: record }),
-          }).catch(() => {});
         }
+      } catch {
+        // Ignore directory permission errors
       }
-    });
-
-    return () => {
-      unsubSnap();
-      unsubComplete();
     };
-  }, [appUser, firebaseUser, showBanner]);
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void runAutoRescan();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [appUser, subjects]);
 
   // Hydrate offline IndexedDB downloads on mount
   useEffect(() => {
@@ -631,7 +583,6 @@ function AppContent() {
         } catch {
           // Ignore
         }
-        downloadManager.setUid(fbUser.uid);
         const isAdmin = isAdminEmail(fbUser.email) && fbUser.emailVerified;
         const cached = readLocalCache<AppUser | null>(CACHE_USER_KEY, null);
         const sameCached = cached?.uid === fbUser.uid ? cached : null;
@@ -1144,7 +1095,6 @@ function AppContent() {
         setAuthError(data.error || 'নাম্বার দিয়ে লগইন ব্যর্থ হয়েছে।');
         return;
       }
-      downloadManager.setUid(data.user.uid);
       try {
         localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
       } catch {
@@ -1450,42 +1400,7 @@ function AppContent() {
     }
   };
 
-  const handleDeleteDownload = async (itemId: string) => {
-    try {
-      await deleteOfflineMedia(itemId);
-    } catch {
-      // Ignore IndexedDB delete failure
-    }
-    setDownloadsMap((prev) => {
-      const next = { ...prev };
-      delete next[itemId];
-      writeLocalCache(CACHE_DOWNLOADS_KEY, next);
-      return next;
-    });
-
-    if (appUser?.authMode === 'google' && firebaseUser) {
-      const path = `users/${firebaseUser.uid}/downloads/${itemId}`;
-      const deleteOp = deleteDoc(
-        doc(db, 'users', firebaseUser.uid, 'downloads', itemId)
-      ).catch((err) => {
-        handleListenerErrorSafe(err, OperationType.DELETE, path);
-      });
-      if (navigator.onLine) {
-        await deleteOp;
-      }
-    } else if (appUser?.authMode === 'number' && appUser.bearerToken) {
-      fetch('/api/number-user/state', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${appUser.bearerToken}`,
-        },
-        body: JSON.stringify({ removeDownloadId: itemId }),
-      }).catch(() => {});
-    }
-  };
-
-  const handleRestoreMatchedRecords = async (records: DownloadRecord[]) => {
+  const handleRestoreMatchedRecords = useCallback(async (records: DownloadRecord[]) => {
     setDownloadsMap((prev) => {
       const next = { ...prev };
       for (const r of records) {
@@ -1529,7 +1444,82 @@ function AppContent() {
         }).catch(() => {});
       }
     }
-  };
+  }, [appUser, firebaseUser]);
+
+  const handleScanDeviceFiles = useCallback(async (files: File[]) => {
+    const uid = appUser?.uid || '';
+    const { restoredCount, matchedRecords } = await scanAndRestoreFilesFromDevice(files, subjects, uid);
+    if (matchedRecords.length > 0) {
+      await handleRestoreMatchedRecords(matchedRecords);
+      showBanner(`${restoredCount}টি ক্লাসের অফলাইন ফাইল যুক্ত হয়েছে।`);
+    }
+    return { restoredCount };
+  }, [appUser?.uid, subjects, handleRestoreMatchedRecords, showBanner]);
+
+  const handlePickSingleOfflineFile = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = '';
+      const target = pendingOfflineTarget;
+      if (!file || !target) return;
+
+      const isPdfTarget = target.type === 'pdf';
+      const entry = await saveOfflineBlobForClass({
+        itemId: target.item.id,
+        subjectId: target.subjectId,
+        sectionId: target.sectionId,
+        sectionTitle: target.sectionTitle,
+        classNumber: target.classNumber,
+        videoName: target.item.name,
+        videoUrl: target.item.videoUrl || '',
+        pdfUrl: target.item.pdfUrl || '',
+        videoBlob: isPdfTarget ? undefined : file,
+        pdfBlob: isPdfTarget ? file : undefined,
+      });
+
+      const rec: DownloadRecord = {
+        uid: appUser?.uid || '',
+        itemId: target.item.id,
+        subjectId: target.subjectId,
+        sectionId: target.sectionId,
+        sectionTitle: target.sectionTitle,
+        classNumber: target.classNumber,
+        videoName: target.item.name,
+        videoUrl: target.item.videoUrl || '',
+        pdfUrl: target.item.pdfUrl || '',
+        fileSizeBytes: entry.fileSizeBytes,
+        hasLocalVideo: !!entry.videoBlob,
+        hasLocalPdf: !!entry.pdfBlob,
+      };
+      await handleRestoreMatchedRecords([rec]);
+      setPendingOfflineTarget(null);
+
+      if (isPdfTarget) {
+        goBackOr((p) => ({
+          ...p,
+          offlineModalOpen: false,
+          activePdf: {
+            itemId: target.item.id,
+            title: target.item.name,
+            pdfUrl: target.item.pdfUrl,
+          },
+        }));
+      } else {
+        goBackOr((p) => ({
+          ...p,
+          offlineModalOpen: false,
+          activeVideo: {
+            item: target.item,
+            subjectId: target.subjectId,
+            sectionId: target.sectionId,
+            sectionTitle: target.sectionTitle,
+            classNumber: target.classNumber,
+          },
+        }));
+      }
+    },
+    [pendingOfflineTarget, appUser?.uid, handleRestoreMatchedRecords, goBackOr]
+  );
 
   const handleSendIssueReport = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1599,25 +1589,9 @@ function AppContent() {
         <div className="h-[100dvh] w-full bg-[#020617] text-slate-100 flex flex-col overflow-hidden overscroll-none">
           {/* Top Notification Toast */}
           {topBanner && (
-            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] max-w-md w-[94%] rounded-2xl bg-emerald-500 text-slate-950 px-4 py-3 shadow-2xl flex items-center justify-between gap-2.5 text-xs sm:text-sm font-bold">
-              <div className="flex items-center gap-2 min-w-0">
-                <CheckCircle2 className="w-5 h-5 shrink-0" />
-                <span className="truncate">{topBanner}</span>
-              </div>
-              {lastCompletedDownload && (
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const target = lastCompletedDownload;
-                    await exportOfflineItemToPhone(target.itemId, target.name);
-                    setTopBanner(null);
-                    setLastCompletedDownload(null);
-                  }}
-                  className="shrink-0 px-2.5 py-1.5 rounded-xl bg-slate-950 text-emerald-300 text-[11px] font-bold"
-                >
-                  ফোনে সেভ
-                </button>
-              )}
+            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] max-w-md w-[94%] rounded-2xl bg-emerald-500 text-slate-950 px-4 py-3 shadow-2xl flex items-center gap-2.5 text-xs sm:text-sm font-bold">
+              <CheckCircle2 className="w-5 h-5 shrink-0" />
+              <span className="truncate">{topBanner}</span>
             </div>
           )}
 
@@ -1699,7 +1673,6 @@ function AppContent() {
                 <SubjectsView
                   subjects={subjects}
                   downloads={downloadsMap}
-                  downloadTasks={downloadTasks}
                   isOnline={isOnline}
                   selectedSubjectId={selectedSubjectId}
                   onSelectSubjectId={(sid) => {
@@ -1720,60 +1693,11 @@ function AppContent() {
                       },
                     }))
                   }
-                  onOfflineAlert={() => pushNav((p) => ({ ...p, offlineModalOpen: true }))}
-                />
-              )}
-
-              {activeTab === 'downloads' && (
-                <DownloadsView
-                  uid={appUser.uid}
-                  subjects={subjects}
-                  downloads={downloadsMap}
-                  downloadTasks={downloadTasks}
-                  isOnline={isOnline}
-                  selectedSubjectId={selectedDownloadSubjectId}
-                  onSelectSubjectId={(sid) => {
-                    if (sid === null) {
-                      goBackOr((p) => ({ ...p, downloadSubjectId: null }));
-                    } else {
-                      pushNav((p) => ({ ...p, downloadSubjectId: sid }));
-                    }
+                  onOfflineAlert={(target) => {
+                    setPendingOfflineTarget(target || null);
+                    pushNav((p) => ({ ...p, offlineModalOpen: true }));
                   }}
-                  onOfflineAlert={() => pushNav((p) => ({ ...p, offlineModalOpen: true }))}
-                  onPlayDownloaded={(rec) => {
-                    const secTitle =
-                      rec.sectionTitle ||
-                      SUBJECT_LIST.find((s) => s.id === rec.subjectId)?.name ||
-                      'ক্লাস';
-                    pushNav((p) => ({
-                      ...p,
-                      activeVideo: {
-                        item: {
-                          id: rec.itemId,
-                          name: rec.videoName,
-                          videoUrl: rec.videoUrl,
-                          pdfUrl: rec.pdfUrl,
-                          createdAt: Date.now(),
-                        },
-                        subjectId: rec.subjectId,
-                        sectionId: rec.sectionId,
-                        sectionTitle: secTitle,
-                        classNumber: rec.classNumber,
-                      },
-                    }));
-                  }}
-                  onOpenDownloadedPdf={(rec) =>
-                    pushNav((p) => ({
-                      ...p,
-                      activePdf: {
-                        itemId: rec.itemId,
-                        title: rec.videoName,
-                        pdfUrl: rec.pdfUrl,
-                      },
-                    }))
-                  }
-                  onDeleteDownload={handleDeleteDownload}
-                  onRestoreMatchedRecords={handleRestoreMatchedRecords}
+                  onScanDeviceFiles={handleScanDeviceFiles}
                 />
               )}
 
@@ -1793,9 +1717,9 @@ function AppContent() {
             </div>
           </main>
 
-          {/* Fixed Bottom Navigation Bar matching Image 2 & 3 (3 Tabs Only: বিষয়সমূহ, ডাউনলোড, প্রোফাইল) */}
+          {/* Fixed Bottom Navigation Bar (2 Tabs Only: বিষয়সমূহ, প্রোফাইল) */}
           <nav className="fixed bottom-0 inset-x-0 z-30 bg-[#060a17]/95 backdrop-blur-md border-t border-slate-800/90 pb-safe">
-            <div className="max-w-xl mx-auto grid grid-cols-3 gap-2 px-3 py-1.5 h-16">
+            <div className="max-w-xl mx-auto grid grid-cols-2 gap-2 px-3 py-1.5 h-16">
               <button
                 type="button"
                 onClick={() => switchTab('subjects')}
@@ -1807,19 +1731,6 @@ function AppContent() {
               >
                 <BookOpen className="w-5 h-5" />
                 <span className="text-[11px] whitespace-nowrap">বিষয়সমূহ</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => switchTab('downloads')}
-                className={`rounded-2xl flex flex-col items-center justify-center gap-1 transition ${
-                  activeTab === 'downloads'
-                    ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Download className="w-5 h-5" />
-                <span className="text-[11px] whitespace-nowrap">ডাউনলোড</span>
               </button>
 
               <button
@@ -1841,8 +1752,6 @@ function AppContent() {
           {activeVideo && (
             <PlyrVideoPlayer
               itemId={activeVideo.item.id}
-              subjectId={activeVideo.subjectId}
-              sectionId={activeVideo.sectionId}
               sectionTitle={activeVideo.sectionTitle}
               classNumber={activeVideo.classNumber}
               videoName={activeVideo.item.name}
@@ -1850,12 +1759,18 @@ function AppContent() {
               pdfUrl={activeVideo.item.pdfUrl}
               durationLabel={activeVideo.item.duration}
               initialPosition={progressMap[activeVideo.item.id]?.currentTime || 0}
-              isDownloaded={Boolean(downloadsMap[activeVideo.item.id])}
-              downloadTask={downloadTasks[activeVideo.item.id]}
               isOnline={isOnline}
               onSaveProgress={handleSaveProgress}
               onOpenPdf={() => {
-                if (!isOnline && !downloadsMap[activeVideo.item.id]) {
+                if (!isOnline && !downloadsMap[activeVideo.item.id]?.hasLocalPdf) {
+                  setPendingOfflineTarget({
+                    type: 'pdf',
+                    item: activeVideo.item,
+                    subjectId: activeVideo.subjectId,
+                    sectionId: activeVideo.sectionId,
+                    sectionTitle: activeVideo.sectionTitle,
+                    classNumber: activeVideo.classNumber,
+                  });
                   pushNav((p) => ({ ...p, offlineModalOpen: true }));
                   return;
                 }
@@ -1868,7 +1783,6 @@ function AppContent() {
                   },
                 }));
               }}
-              onOfflineAttempt={() => pushNav((p) => ({ ...p, offlineModalOpen: true }))}
               onClose={() => goBackOr((p) => ({ ...p, activeVideo: null }))}
             />
           )}
@@ -1881,6 +1795,30 @@ function AppContent() {
               title={activePdf.title}
               itemId={activePdf.itemId}
               pdfUrl={activePdf.pdfUrl}
+              onOfflineCached={(info) => {
+                setDownloadsMap((prev) => {
+                  const existing = prev[info.itemId];
+                  const next: Record<string, DownloadRecord> = {
+                    ...prev,
+                    [info.itemId]: {
+                      uid: appUser.uid,
+                      itemId: info.itemId,
+                      subjectId: existing?.subjectId || '',
+                      sectionId: existing?.sectionId || '',
+                      sectionTitle: existing?.sectionTitle || '',
+                      classNumber: existing?.classNumber || 1,
+                      videoName: existing?.videoName || activePdf.title,
+                      videoUrl: existing?.videoUrl || '',
+                      pdfUrl: activePdf.pdfUrl,
+                      fileSizeBytes: info.fileSizeBytes,
+                      hasLocalVideo: info.hasLocalVideo,
+                      hasLocalPdf: info.hasLocalPdf,
+                    },
+                  };
+                  writeLocalCache(CACHE_DOWNLOADS_KEY, next);
+                  return next;
+                });
+              }}
             />
           )}
 
@@ -1971,17 +1909,43 @@ function AppContent() {
           {offlineModalOpen && (
             <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
               <div className="w-full max-w-xs rounded-3xl bg-slate-900 border border-amber-500/40 p-6 text-center space-y-4 shadow-2xl">
+                <input
+                  ref={offlineFileInputRef}
+                  type="file"
+                  accept={
+                    pendingOfflineTarget?.type === 'pdf'
+                      ? 'application/pdf,.pdf'
+                      : 'video/*,.mp4,.mkv,.webm,.mov,.m4v'
+                  }
+                  onChange={handlePickSingleOfflineFile}
+                  className="hidden"
+                />
                 <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center mx-auto">
                   <WifiOff className="w-6 h-6 text-amber-400" />
                 </div>
                 <h3 className="text-base font-bold text-white">আপনি এখন অফলাইনে আছেন</h3>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  এই ভিডিও বা PDF টি ডাউনলোড করা নেই। অফলাইনে দেখতে চাইলে ইন্টারনেট সংযোগ চালু করে ডাউনলোড করুন।
+                  {pendingOfflineTarget
+                    ? `এই ${pendingOfflineTarget.type === 'pdf' ? 'PDF' : 'ভিডিও'} টি অ্যাপে সংরক্ষিত নেই। আপনার ফোনে ডাউনলোড করা থাকলে নিচের বাটনে ট্যাপ করে ফাইলটি সিলেক্ট করুন।`
+                    : 'এই ভিডিও বা PDF টি সংরক্ষিত নেই। অফলাইনে দেখতে চাইলে ইন্টারনেট সংযোগ চালু করে ওপেন বা ডাউনলোড করুন।'}
                 </p>
+                {pendingOfflineTarget && (
+                  <button
+                    type="button"
+                    onClick={() => offlineFileInputRef.current?.click()}
+                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5"
+                  >
+                    <FolderSearch className="w-4 h-4 shrink-0" />
+                    <span>ফোন থেকে ফাইল সিলেক্ট করে খুলুন</span>
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => goBackOr((p) => ({ ...p, offlineModalOpen: false }))}
-                  className="w-full py-2.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-sm"
+                  onClick={() => {
+                    setPendingOfflineTarget(null);
+                    goBackOr((p) => ({ ...p, offlineModalOpen: false }));
+                  }}
+                  className="w-full py-2.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold text-sm"
                 >
                   ঠিক আছে
                 </button>

@@ -12,7 +12,6 @@ import {
   Rewind,
   RotateCcw,
 } from 'lucide-react';
-import { DownloadTask } from '../types';
 import {
   encodeProxyParam,
   extractDirectVideoEmbedUrl,
@@ -26,12 +25,9 @@ import {
   resolveStreamUrl,
   safeOpenExternalUrl,
 } from '../lib/offlineStorage';
-import { LiquidDownloadBox } from './LiquidDownloadBox';
 
 interface PlyrVideoPlayerProps {
   itemId: string;
-  subjectId: string;
-  sectionId: string;
   sectionTitle: string;
   classNumber: number;
   videoName: string;
@@ -39,12 +35,9 @@ interface PlyrVideoPlayerProps {
   pdfUrl: string;
   durationLabel?: string;
   initialPosition: number;
-  isDownloaded: boolean;
-  downloadTask?: DownloadTask;
   isOnline: boolean;
   onSaveProgress: (itemId: string, currentTime: number, duration: number) => void;
   onOpenPdf: () => void;
-  onOfflineAttempt: () => void;
   onClose: () => void;
 }
 
@@ -59,8 +52,6 @@ function formatDurationMinutes(sec: number): string {
 
 export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   itemId,
-  subjectId,
-  sectionId,
   sectionTitle,
   classNumber,
   videoName,
@@ -68,12 +59,9 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   pdfUrl,
   durationLabel,
   initialPosition,
-  isDownloaded,
-  downloadTask,
   isOnline,
   onSaveProgress,
   onOpenPdf,
-  onOfflineAttempt,
   onClose,
 }) => {
   const containerWrapRef = useRef<HTMLDivElement | null>(null);
@@ -685,23 +673,8 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
             </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-            <LiquidDownloadBox
-              itemId={itemId}
-              subjectId={subjectId}
-              sectionId={sectionId}
-              sectionTitle={sectionTitle}
-              classNumber={classNumber}
-              videoName={videoName}
-              videoUrl={videoUrl}
-              pdfUrl={pdfUrl}
-              isDownloaded={isDownloaded}
-              task={downloadTask}
-              isOnline={isOnline}
-              onOfflineAttempt={onOfflineAttempt}
-            />
-
-            {pdfUrl ? (
+          {pdfUrl ? (
+            <div className="pt-1">
               <button
                 type="button"
                 onClick={onOpenPdf}
@@ -710,8 +683,8 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
                 <FileText className="w-4 h-4 text-indigo-300 shrink-0" />
                 <span>PDF দেখুন</span>
               </button>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>

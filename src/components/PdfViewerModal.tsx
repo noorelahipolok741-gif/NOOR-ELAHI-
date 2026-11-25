@@ -23,6 +23,7 @@ import {
   normalizeMediaUrl,
   resolveStreamUrl,
   sanitizeBaseFilename,
+  saveOfflineBlobForClass,
 } from '../lib/offlineStorage';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
@@ -33,6 +34,12 @@ interface PdfViewerModalProps {
   title: string;
   itemId: string;
   pdfUrl: string;
+  onOfflineCached?: (info: {
+    itemId: string;
+    fileSizeBytes: number;
+    hasLocalVideo: boolean;
+    hasLocalPdf: boolean;
+  }) => void;
 }
 
 interface LoadProgress {
@@ -314,6 +321,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   title,
   itemId,
   pdfUrl,
+  onOfflineCached,
 }) => {
   const scrollWrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -479,6 +487,21 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                 if (!directCt.includes('text/html')) {
                   const directBlob = await readBlobWithProgress(directRes);
                   if (await blobStartsWithPdfHeader(directBlob)) {
+                    saveOfflineBlobForClass({
+                      itemId,
+                      videoName: title,
+                      pdfUrl,
+                      pdfBlob: directBlob,
+                    })
+                      .then((entry) => {
+                        onOfflineCached?.({
+                          itemId,
+                          fileSizeBytes: entry.fileSizeBytes,
+                          hasLocalVideo: Boolean(entry.videoBlob),
+                          hasLocalPdf: Boolean(entry.pdfBlob),
+                        });
+                      })
+                      .catch(() => {});
                     if (!cancelled) {
                       setPdfBlob(directBlob);
                       setLoading(false);
@@ -552,6 +575,22 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           }
           throw new Error('ফাইলটি বৈধ PDF ফরম্যাটে নেই।');
         }
+
+        saveOfflineBlobForClass({
+          itemId,
+          videoName: title,
+          pdfUrl,
+          pdfBlob: fetchedBlob,
+        })
+          .then((entry) => {
+            onOfflineCached?.({
+              itemId,
+              fileSizeBytes: entry.fileSizeBytes,
+              hasLocalVideo: Boolean(entry.videoBlob),
+              hasLocalPdf: Boolean(entry.pdfBlob),
+            });
+          })
+          .catch(() => {});
 
         if (!cancelled) {
           setPdfBlob(fetchedBlob);
