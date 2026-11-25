@@ -3,6 +3,8 @@ import Plyr from 'plyr';
 import Hls from 'hls.js';
 import {
   ArrowLeft,
+  Check,
+  Download,
   ExternalLink,
   FastForward,
   FileText,
@@ -21,13 +23,18 @@ import {
   isDirectVideoFileUrl,
   isHlsUrl,
   normalizeMediaUrl,
+  resolveDownloadProxyUrl,
   resolveHlsProxyUrl,
   resolveStreamUrl,
   safeOpenExternalUrl,
+  sanitizeBaseFilename,
+  saveOfflineBlobForClass,
 } from '../lib/offlineStorage';
 
 interface PlyrVideoPlayerProps {
   itemId: string;
+  subjectId?: string;
+  sectionId?: string;
   sectionTitle: string;
   classNumber: number;
   videoName: string;
@@ -36,8 +43,15 @@ interface PlyrVideoPlayerProps {
   durationLabel?: string;
   initialPosition: number;
   isOnline: boolean;
+  hasOfflineVideo?: boolean;
   onSaveProgress: (itemId: string, currentTime: number, duration: number) => void;
   onOpenPdf: () => void;
+  onOfflineCached?: (info: {
+    itemId: string;
+    fileSizeBytes: number;
+    hasLocalVideo: boolean;
+    hasLocalPdf: boolean;
+  }) => void;
   onClose: () => void;
 }
 
@@ -52,6 +66,8 @@ function formatDurationMinutes(sec: number): string {
 
 export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   itemId,
+  subjectId,
+  sectionId,
   sectionTitle,
   classNumber,
   videoName,
@@ -60,8 +76,10 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   durationLabel,
   initialPosition,
   isOnline,
+  hasOfflineVideo = false,
   onSaveProgress,
   onOpenPdf,
+  onOfflineCached,
   onClose,
 }) => {
   const containerWrapRef = useRef<HTMLDivElement | null>(null);
@@ -80,6 +98,14 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   const [reloadKey, setReloadKey] = useState(0);
   const [seekBadge, setSeekBadge] = useState<'+10s' | '-10s' | null>(null);
   const [detectedDuration, setDetectedDuration] = useState<number>(0);
+  const [offlineSaved, setOfflineSaved] = useState<boolean>(hasOfflineVideo);
+  const [savingOffline, setSavingOffline] = useState(false);
+  const [savePct, setSavePct] = useState<number | null>(null);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    setOfflineSaved(hasOfflineVideo);
+  }, [hasOfflineVideo, itemId]);
 
   // Block Plyr's synthetic CustomEvent('error', { bubbles: true }) from bubbling to window
   useEffect(() => {
@@ -110,10 +136,17 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
 
       try {
         const offline = await getOfflineMedia(itemId);
-        if (offline?.videoBlob && !cancelled) {
+        if (offline?.videoBlob && offline.videoBlob.size > 0 && !cancelled) {
           objectUrl = URL.createObjectURL(offline.videoBlob);
           sourceUrl = objectUrl;
           usingOfflineBlob = true;
+          setOfflineSaved(true);
+          onOfflineCached?.({
+            itemId,
+            fileSizeBytes: offline.fileSizeBytes || offline.videoBlob.size,
+            hasLocalVideo: true,
+            hasLocalPdf: Boolean(offline.pdfBlob && offline.pdfBlob.size > 0),
+          });
         }
       } catch {
         // Continue to network URL
@@ -344,7 +377,13 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
       let resolvedAttempted = false;
       const triggerSmartResolutionOrError = async () => {
         if (cancelled) return;
-        if (usingOfflineBlob || resolvedAttempted) {
+        if (usingOfflineBlob) {
+          setIsBuffering(false);
+          setIsPlaying(false);
+          setPlayerError('অফলাইন ভিডিও ফাইলটি প্লে করা যায়নি। ফাইলটি সঠিক MP4/WebM ফরম্যাটে আছে কিনা দেখুন।');
+          return;
+        }
+        if (resolvedAttempted) {
           setIsBuffering(false);
           setIsPlaying(false);
           setPlayerError('ভিডিওটি চালু করা যায়নি। লিংক বা ইন্টারনেট সংযোগ পরীক্ষা করুন।');
@@ -509,10 +548,85 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
     safeOpenExternalUrl(target);
   };
 
+  const handleSaveOfflineVideo = async () => {
+    if (savingOffline || !videoUrl || !isOnline) return;
+    setSavingOffline(true);
+    setSavePct(null);
+    setSaveNotice(null);
+
+    try {
+      const filename = `${sanitizeBaseFilename(videoName || 'video')}.mp4`;
+      const proxyUrl = resolveDownloadProxyUrl(videoUrl, filename, 'video');
+      if (!proxyUrl) throw new Error('অফলাইন সেভের জন্য সরাসরি ভিডিও লিংক পাওয়া যায়নি।');
+
+      const res = await fetch(proxyUrl);
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (!res.ok || ct.includes('text/html') || ct.includes('application/json')) {
+        throw new Error('ড্রাইভ থেকে সরাসরি সংরক্ষণ করা যায়নি — "ব্রাউজার" থেকে ডাউনলোড করে অফলাইন স্ক্যান করুন।');
+      }
+
+      const total = Number(res.headers.get('content-length') || '0');
+      let blob: Blob;
+      if (res.body) {
+        const reader = res.body.getReader();
+        const chunks: BlobPart[] = [];
+        let loaded = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            loaded += value.byteLength;
+            if (total > 0) {
+              setSavePct(Math.min(100, Math.round((loaded / total) * 100)));
+            }
+          }
+        }
+        blob = new Blob(chunks, { type: ct.startsWith('video/') ? ct : 'video/mp4' });
+      } else {
+        blob = await res.blob();
+      }
+
+      if (blob.size < 4096) {
+        throw new Error('ভিডিও ফাইলটি সম্পূর্ণ পাওয়া যায়নি।');
+      }
+
+      const entry = await saveOfflineBlobForClass({
+        itemId,
+        subjectId,
+        sectionId,
+        sectionTitle,
+        classNumber,
+        videoName,
+        videoUrl,
+        pdfUrl,
+        videoBlob: blob,
+      });
+
+      setOfflineSaved(true);
+      setSaveNotice('অফলাইনে সংরক্ষিত হয়েছে!');
+      onOfflineCached?.({
+        itemId,
+        fileSizeBytes: entry.fileSizeBytes,
+        hasLocalVideo: true,
+        hasLocalPdf: Boolean(entry.pdfBlob && entry.pdfBlob.size > 0),
+      });
+    } catch (err) {
+      setSaveNotice(
+        err instanceof Error
+          ? err.message
+          : 'ড্রাইভ থেকে সরাসরি সংরক্ষণ হয়নি — ব্রাউজার দিয়ে ডাউনলোড করে স্ক্যান করুন।'
+      );
+    } finally {
+      setSavingOffline(false);
+      setSavePct(null);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-[#020617] flex flex-col overflow-y-auto overflow-x-hidden overscroll-none">
       {/* Top Bar */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-800/80 bg-slate-950/90 shrink-0">
+      <div className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-3 border-b border-slate-800/80 bg-slate-950/90 shrink-0">
         <button
           type="button"
           onClick={onClose}
@@ -527,18 +641,58 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
           </p>
           <h2 className="text-sm font-bold text-white truncate">{videoName}</h2>
         </div>
+
+        {offlineSaved ? (
+          <div className="shrink-0 h-9 px-2.5 rounded-xl bg-emerald-500/15 border border-emerald-500/35 text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+            <span className="w-4 h-4 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center shrink-0">
+              <Check className="w-3 h-3 stroke-[3]" />
+            </span>
+            <span className="hidden sm:inline">অফলাইন</span>
+          </div>
+        ) : (
+          isOnline &&
+          videoUrl && (
+            <button
+              type="button"
+              disabled={savingOffline}
+              onClick={handleSaveOfflineVideo}
+              className="shrink-0 h-9 px-2.5 sm:px-3 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 disabled:opacity-60 transition"
+              title="অ্যাপে অফলাইনে সেভ করুন"
+            >
+              {savingOffline ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+              ) : (
+                <Download className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span>
+                {savingOffline
+                  ? savePct !== null
+                    ? `${savePct}%`
+                    : 'সেভ হচ্ছে'
+                  : 'অফলাইন সেভ'}
+              </span>
+            </button>
+          )
+        )}
+
         {isOnline && videoUrl && (
           <button
             type="button"
             onClick={openExternalVideo}
-            className="shrink-0 h-9 px-3 rounded-xl bg-slate-900 border border-slate-800 text-xs font-medium text-slate-300 hover:text-white flex items-center gap-1.5"
-            title="ব্রাউজারে খুলুন"
+            className="shrink-0 h-9 px-2.5 sm:px-3 rounded-xl bg-slate-900 border border-slate-800 text-xs font-medium text-slate-300 hover:text-white flex items-center gap-1.5"
+            title="ড্রাইভ বা ব্রাউজারে খুলুন"
           >
             <ExternalLink className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">ব্রাউজার</span>
           </button>
         )}
       </div>
+
+      {saveNotice && (
+        <div className="px-4 py-2 bg-slate-900 border-b border-emerald-500/25 text-xs text-emerald-300 text-center shrink-0">
+          {saveNotice}
+        </div>
+      )}
 
       {/* Main Content Container */}
       <div className="w-full max-w-4xl mx-auto p-4 space-y-5">

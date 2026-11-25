@@ -52,6 +52,7 @@ import {
 import {
   listOfflineMedia,
   loadAppStateBackup,
+  reconcileOfflineDownloadsWithCatalog,
   removeAppStateBackup,
   saveAppStateBackup,
   saveOfflineBlobForClass,
@@ -250,6 +251,13 @@ function AppContent() {
   const [topBanner, setTopBanner] = useState<string | null>(null);
   const [pendingOfflineTarget, setPendingOfflineTarget] = useState<OfflineTargetPayload | null>(null);
   const offlineFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [scanProgress, setScanProgress] = useState<{
+    active: boolean;
+    scanned: number;
+    total: number;
+    matched: number;
+  } | null>(null);
+  const [cloudDownloadIds, setCloudDownloadIds] = useState<Set<string>>(new Set());
 
   const unreadNotifCount = useMemo(
     () => notifications.filter((n) => !seenNotifIds.has(n.id)).length,
@@ -457,46 +465,101 @@ function AppContent() {
   }, []);
 
   // Auto-rescan previously granted device download directory when returning from external Drive/browser
+  // Progressive offline sync: verify IndexedDB media against catalog & rescan granted device folder on mount/visibility/offline
   useEffect(() => {
-    if (!appUser || Object.keys(subjects).length === 0) return;
+    if (!appUser) return;
+    let cancelled = false;
 
-    const runAutoRescan = async () => {
+    const runProgressiveSync = async (includeDirRescan: boolean) => {
       try {
-        const matched = await tryAutoRescanGrantedDirectory(subjects, appUser.uid);
-        if (matched.length > 0) {
+        const reconciled = await reconcileOfflineDownloadsWithCatalog(subjects, appUser.uid);
+        if (!cancelled && Object.keys(reconciled).length > 0) {
           setDownloadsMap((prev) => {
             const next = { ...prev };
-            for (const r of matched) {
-              next[r.itemId] = r;
+            for (const [id, rec] of Object.entries(reconciled)) {
+              next[id] = rec;
             }
             writeLocalCache(CACHE_DOWNLOADS_KEY, next);
             return next;
           });
         }
       } catch {
-        // Ignore directory permission errors
+        // Ignore IDB sync failure
+      }
+
+      if (!includeDirRescan || Object.keys(subjects).length === 0) return;
+
+      try {
+        const matched = await tryAutoRescanGrantedDirectory(
+          subjects,
+          appUser.uid,
+          (scanned, total, matchedCount) => {
+            if (!cancelled) {
+              setScanProgress({ active: true, scanned, total, matched: matchedCount });
+            }
+          }
+        );
+        if (!cancelled) {
+          setScanProgress(null);
+          if (matched.length > 0) {
+            setDownloadsMap((prev) => {
+              const next = { ...prev };
+              for (const r of matched) {
+                next[r.itemId] = r;
+              }
+              writeLocalCache(CACHE_DOWNLOADS_KEY, next);
+              return next;
+            });
+          }
+        }
+      } catch {
+        if (!cancelled) setScanProgress(null);
       }
     };
+
+    const timer = window.setTimeout(() => {
+      void runProgressiveSync(true);
+    }, 350);
 
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
-        void runAutoRescan();
+        void runProgressiveSync(true);
       }
     };
+    const onOfflineEvent = () => {
+      void runProgressiveSync(true);
+    };
+
     document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('offline', onOfflineEvent);
     return () => {
+      cancelled = true;
+      clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('offline', onOfflineEvent);
     };
   }, [appUser, subjects]);
 
-  // Hydrate offline IndexedDB downloads on mount
+  // Hydrate offline IndexedDB downloads on mount (even before subjects load)
   useEffect(() => {
     listOfflineMedia()
       .then((entries) => {
-        if (entries.length === 0) return;
+        const entryMap = new Map(entries.map((e) => [e.itemId, e]));
         setDownloadsMap((prev) => {
-          const next = { ...prev };
+          const next: Record<string, DownloadRecord> = {};
+          for (const [id, existing] of Object.entries(prev)) {
+            if (!entryMap.has(id)) {
+              next[id] = {
+                ...existing,
+                hasLocalVideo: false,
+                hasLocalPdf: false,
+              };
+            }
+          }
           for (const entry of entries) {
+            const hasVideo = Boolean(entry.videoBlob && entry.videoBlob.size > 0);
+            const hasPdf = Boolean(entry.pdfBlob && entry.pdfBlob.size > 0);
+            if (!hasVideo && !hasPdf) continue;
             next[entry.itemId] = {
               uid: appUser?.uid || prev[entry.itemId]?.uid || '',
               itemId: entry.itemId,
@@ -508,8 +571,8 @@ function AppContent() {
               videoUrl: entry.videoUrl,
               pdfUrl: entry.pdfUrl,
               fileSizeBytes: entry.fileSizeBytes,
-              hasLocalVideo: !!entry.videoBlob,
-              hasLocalPdf: !!entry.pdfBlob,
+              hasLocalVideo: hasVideo,
+              hasLocalPdf: hasPdf,
             };
           }
           writeLocalCache(CACHE_DOWNLOADS_KEY, next);
@@ -922,20 +985,23 @@ function AppContent() {
       )
     );
 
-    // 4. Downloads Registry
+    // 4. Downloads Registry (preserves local IndexedDB flags & detects previously downloaded items after reinstall)
     const dlPath = `users/${firebaseUser.uid}/downloads`;
     unsubs.push(
       onSnapshot(
         query(collection(db, dlPath), where('uid', '==', firebaseUser.uid)),
         (snap) => {
+          const nextCloudIds = new Set<string>();
+          snap.forEach((d) => nextCloudIds.add(d.id));
+          setCloudDownloadIds(nextCloudIds);
           setDownloadsMap((prev) => {
             const next = { ...prev };
             snap.forEach((d) => {
               const rec = d.data() as DownloadRecord;
               next[d.id] = {
                 ...rec,
-                hasLocalVideo: prev[d.id]?.hasLocalVideo,
-                hasLocalPdf: prev[d.id]?.hasLocalPdf,
+                hasLocalVideo: Boolean(prev[d.id]?.hasLocalVideo),
+                hasLocalPdf: Boolean(prev[d.id]?.hasLocalPdf),
               };
             });
             writeLocalCache(CACHE_DOWNLOADS_KEY, next);
@@ -1446,14 +1512,38 @@ function AppContent() {
     }
   }, [appUser, firebaseUser]);
 
+  const pendingReinstallCount = useMemo(() => {
+    if (cloudDownloadIds.size === 0) return 0;
+    let missingLocally = 0;
+    for (const id of cloudDownloadIds) {
+      const rec = downloadsMap[id];
+      if (!rec || (!rec.hasLocalVideo && !rec.hasLocalPdf)) {
+        missingLocally += 1;
+      }
+    }
+    return missingLocally;
+  }, [cloudDownloadIds, downloadsMap]);
+
   const handleScanDeviceFiles = useCallback(async (files: File[]) => {
     const uid = appUser?.uid || '';
-    const { restoredCount, matchedRecords } = await scanAndRestoreFilesFromDevice(files, subjects, uid);
-    if (matchedRecords.length > 0) {
-      await handleRestoreMatchedRecords(matchedRecords);
-      showBanner(`${restoredCount}টি ক্লাসের অফলাইন ফাইল যুক্ত হয়েছে।`);
+    setScanProgress({ active: true, scanned: 0, total: Math.max(1, files.length), matched: 0 });
+    try {
+      const { restoredCount, matchedRecords } = await scanAndRestoreFilesFromDevice(
+        files,
+        subjects,
+        uid,
+        (scanned, total, matched) => {
+          setScanProgress({ active: true, scanned, total, matched });
+        }
+      );
+      if (matchedRecords.length > 0) {
+        await handleRestoreMatchedRecords(matchedRecords);
+        showBanner(`${restoredCount}টি ক্লাসের অফলাইন ফাইল যুক্ত হয়েছে।`);
+      }
+      return { restoredCount };
+    } finally {
+      setScanProgress(null);
     }
-    return { restoredCount };
   }, [appUser?.uid, subjects, handleRestoreMatchedRecords, showBanner]);
 
   const handlePickSingleOfflineFile = useCallback(
@@ -1698,6 +1788,8 @@ function AppContent() {
                     pushNav((p) => ({ ...p, offlineModalOpen: true }));
                   }}
                   onScanDeviceFiles={handleScanDeviceFiles}
+                  scanProgress={scanProgress}
+                  pendingReinstallCount={pendingReinstallCount}
                 />
               )}
 
@@ -1752,6 +1844,8 @@ function AppContent() {
           {activeVideo && (
             <PlyrVideoPlayer
               itemId={activeVideo.item.id}
+              subjectId={activeVideo.subjectId}
+              sectionId={activeVideo.sectionId}
               sectionTitle={activeVideo.sectionTitle}
               classNumber={activeVideo.classNumber}
               videoName={activeVideo.item.name}
@@ -1760,7 +1854,25 @@ function AppContent() {
               durationLabel={activeVideo.item.duration}
               initialPosition={progressMap[activeVideo.item.id]?.currentTime || 0}
               isOnline={isOnline}
+              hasOfflineVideo={Boolean(downloadsMap[activeVideo.item.id]?.hasLocalVideo)}
               onSaveProgress={handleSaveProgress}
+              onOfflineCached={(info) => {
+                const rec: DownloadRecord = {
+                  uid: appUser.uid,
+                  itemId: info.itemId,
+                  subjectId: activeVideo.subjectId,
+                  sectionId: activeVideo.sectionId,
+                  sectionTitle: activeVideo.sectionTitle,
+                  classNumber: activeVideo.classNumber,
+                  videoName: activeVideo.item.name,
+                  videoUrl: activeVideo.item.videoUrl || '',
+                  pdfUrl: activeVideo.item.pdfUrl || '',
+                  fileSizeBytes: info.fileSizeBytes,
+                  hasLocalVideo: info.hasLocalVideo,
+                  hasLocalPdf: info.hasLocalPdf,
+                };
+                void handleRestoreMatchedRecords([rec]);
+              }}
               onOpenPdf={() => {
                 if (!isOnline && !downloadsMap[activeVideo.item.id]?.hasLocalPdf) {
                   setPendingOfflineTarget({
@@ -1796,28 +1908,22 @@ function AppContent() {
               itemId={activePdf.itemId}
               pdfUrl={activePdf.pdfUrl}
               onOfflineCached={(info) => {
-                setDownloadsMap((prev) => {
-                  const existing = prev[info.itemId];
-                  const next: Record<string, DownloadRecord> = {
-                    ...prev,
-                    [info.itemId]: {
-                      uid: appUser.uid,
-                      itemId: info.itemId,
-                      subjectId: existing?.subjectId || '',
-                      sectionId: existing?.sectionId || '',
-                      sectionTitle: existing?.sectionTitle || '',
-                      classNumber: existing?.classNumber || 1,
-                      videoName: existing?.videoName || activePdf.title,
-                      videoUrl: existing?.videoUrl || '',
-                      pdfUrl: activePdf.pdfUrl,
-                      fileSizeBytes: info.fileSizeBytes,
-                      hasLocalVideo: info.hasLocalVideo,
-                      hasLocalPdf: info.hasLocalPdf,
-                    },
-                  };
-                  writeLocalCache(CACHE_DOWNLOADS_KEY, next);
-                  return next;
-                });
+                const existing = downloadsMap[info.itemId];
+                const rec: DownloadRecord = {
+                  uid: appUser.uid,
+                  itemId: info.itemId,
+                  subjectId: existing?.subjectId || '',
+                  sectionId: existing?.sectionId || '',
+                  sectionTitle: existing?.sectionTitle || '',
+                  classNumber: existing?.classNumber || 1,
+                  videoName: existing?.videoName || activePdf.title,
+                  videoUrl: existing?.videoUrl || '',
+                  pdfUrl: activePdf.pdfUrl,
+                  fileSizeBytes: info.fileSizeBytes,
+                  hasLocalVideo: info.hasLocalVideo,
+                  hasLocalPdf: info.hasLocalPdf,
+                };
+                void handleRestoreMatchedRecords([rec]);
               }}
             />
           )}

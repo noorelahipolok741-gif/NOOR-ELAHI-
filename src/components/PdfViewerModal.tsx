@@ -455,6 +455,12 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                 : new Blob([offline.pdfBlob], { type: 'application/pdf' });
             setPdfBlob(safeBlob);
             setLoading(false);
+            onOfflineCached?.({
+              itemId,
+              fileSizeBytes: offline.fileSizeBytes || safeBlob.size,
+              hasLocalVideo: Boolean(offline.videoBlob && offline.videoBlob.size > 0),
+              hasLocalPdf: true,
+            });
             return;
           }
         }
@@ -844,6 +850,31 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
               download={blobUrl ? downloadFilename : undefined}
               target={blobUrl ? undefined : '_blank'}
               rel={blobUrl ? undefined : 'noopener noreferrer'}
+              onClick={() => {
+                if (!blobUrl && typeof navigator !== 'undefined' && navigator.onLine && pdfUrl) {
+                  const proxyTarget = resolveStreamUrl(normalizeMediaUrl(pdfUrl), 'pdf');
+                  if (proxyTarget) {
+                    fetch(proxyTarget)
+                      .then((r) => (r.ok ? r.blob() : null))
+                      .then(async (b) => {
+                        if (!b || !(await blobStartsWithPdfHeader(b))) return;
+                        const entry = await saveOfflineBlobForClass({
+                          itemId,
+                          videoName: title,
+                          pdfUrl,
+                          pdfBlob: b,
+                        });
+                        onOfflineCached?.({
+                          itemId,
+                          fileSizeBytes: entry.fileSizeBytes,
+                          hasLocalVideo: Boolean(entry.videoBlob && entry.videoBlob.size > 0),
+                          hasLocalPdf: Boolean(entry.pdfBlob && entry.pdfBlob.size > 0),
+                        });
+                      })
+                      .catch(() => {});
+                  }
+                }
+              }}
               className="flex items-center gap-1 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 px-2.5 py-2 text-xs font-semibold text-emerald-300 transition"
               title="মোবাইলে PDF সেভ করুন"
             >

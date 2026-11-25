@@ -180,7 +180,9 @@ if ('serviceWorker' in navigator) {
         return navigator.serviceWorker.ready;
       })
       .then((readyReg) => {
-        warmServiceWorkerCache(readyReg.active || navigator.serviceWorker.controller);
+        const targetSw = readyReg.active || navigator.serviceWorker.controller;
+        warmServiceWorkerCache(targetSw);
+        window.setTimeout(() => warmServiceWorkerCache(targetSw), 2500);
       })
       .catch(() => {});
 

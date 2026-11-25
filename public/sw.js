@@ -1,5 +1,5 @@
-const CACHE_NAME = 'noor-elahi-v12';
-const FONT_CACHE = 'noor-elahi-fonts-v12';
+const CACHE_NAME = 'noor-elahi-v13';
+const FONT_CACHE = 'noor-elahi-fonts-v13';
 
 const CORE_SHELL_ASSETS = [
   '/',
@@ -215,8 +215,14 @@ self.addEventListener('fetch', (event) => {
         const fontCache = await caches.open(FONT_CACHE);
         const cached = await fontCache.match(request);
         if (cached) return cached;
+        if (!self.navigator.onLine) {
+          if (url.hostname === 'fonts.googleapis.com') {
+            return new Response('', { status: 200, headers: { 'Content-Type': 'text/css' } });
+          }
+          return Response.error();
+        }
         try {
-          const res = await fetchWithTimeout(request, 5000);
+          const res = await fetchWithTimeout(request, 3500);
           if (res && (res.ok || res.type === 'opaque')) {
             await fontCache.put(request, res.clone());
           }
@@ -234,7 +240,7 @@ self.addEventListener('fetch', (event) => {
 
   if (url.origin !== self.location.origin) return;
 
-  // Navigation requests (HTML shell): NetworkFirst with no-store + generous timeout so installed PWAs never stay on old shells
+  // Navigation requests (HTML shell): Instant cache when offline; fast NetworkFirst with background fallback when online
   if (request.mode === 'navigate') {
     event.respondWith(
       (async () => {
@@ -244,8 +250,13 @@ self.addEventListener('fetch', (event) => {
           (await cache.match(request, { ignoreSearch: true })) ||
           (await cache.match('/')) ||
           (await cache.match('/index.html'));
+
+        if (!self.navigator.onLine && cachedNav) {
+          return cachedNav;
+        }
+
         try {
-          const netRes = await fetchWithTimeout(request, cachedNav ? 6000 : 14000, true);
+          const netRes = await fetchWithTimeout(request, cachedNav ? 2500 : 12000, true);
           if (netRes && netRes.ok) {
             const ct = (netRes.headers.get('content-type') || '').toLowerCase();
             if (ct.includes('text/html')) {
@@ -263,17 +274,22 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Same-origin JS/CSS/TSX/SVG/PNG/JSON assets
-  // NEVER fall back to '/' HTML for JS/CSS modules
+  // Same-origin JS/CSS/TSX/SVG/PNG/JSON/WASM assets
+  // Serve immediately from cache when offline or for immutable/static bundles; NEVER return HTML for modules
   event.respondWith(
     (async () => {
       const cache = await caches.open(CACHE_NAME);
       const exactCached = await cache.match(request);
+      const looseCached = exactCached || (await cache.match(request, { ignoreSearch: true }));
+
+      if (!self.navigator.onLine && looseCached) {
+        return looseCached;
+      }
 
       const isImmutableOrStatic =
         url.pathname.startsWith('/assets/') ||
         url.pathname.startsWith('/pdfjs/') ||
-        url.pathname.startsWith('/node_modules/.vite/deps/') ||
+        url.pathname.startsWith('/node_modules/') ||
         url.pathname.startsWith('/icon') ||
         url.pathname.startsWith('/maskable') ||
         url.pathname.startsWith('/apple-touch-icon') ||
@@ -282,25 +298,26 @@ self.addEventListener('fetch', (event) => {
         url.pathname === '/favicon.svg';
 
       if (isImmutableOrStatic && exactCached) {
-        fetch(request)
-          .then((fresh) => {
-            if (fresh && fresh.ok) {
-              cache.put(request, fresh.clone());
-            }
-          })
-          .catch(() => {});
+        event.waitUntil(
+          fetch(request)
+            .then((fresh) => {
+              if (fresh && fresh.ok) {
+                return cache.put(request, fresh.clone());
+              }
+              return undefined;
+            })
+            .catch(() => undefined)
+        );
         return exactCached;
       }
 
       try {
-        const netRes = await fetchWithTimeout(request, exactCached ? 6000 : 15000, true);
+        const netRes = await fetchWithTimeout(request, looseCached ? 2500 : 12000, true);
         if (netRes && netRes.ok) {
           await cache.put(request, netRes.clone());
         }
         return netRes;
       } catch {
-        if (exactCached) return exactCached;
-        const looseCached = await cache.match(request, { ignoreSearch: true });
         if (looseCached) return looseCached;
         return Response.error();
       }

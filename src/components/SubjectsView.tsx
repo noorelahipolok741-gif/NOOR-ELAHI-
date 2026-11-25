@@ -51,6 +51,13 @@ interface SubjectsViewProps {
   onOpenPdf: (payload: { item: ClassItem; isDownloaded: boolean }) => void;
   onOfflineAlert: (target?: OfflineTargetPayload) => void;
   onScanDeviceFiles?: (files: File[]) => Promise<{ restoredCount: number }>;
+  scanProgress?: {
+    active: boolean;
+    scanned: number;
+    total: number;
+    matched: number;
+  } | null;
+  pendingReinstallCount?: number;
 }
 
 const TOUR_SEEN_KEY = 'noor_elahi_subject_tour_seen_v1';
@@ -104,6 +111,8 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
   onOpenPdf,
   onOfflineAlert,
   onScanDeviceFiles,
+  scanProgress,
+  pendingReinstallCount = 0,
 }) => {
   const [localSubjectId, setLocalSubjectId] = useState<string | null>(null);
   const selectedSubjectId =
@@ -203,10 +212,41 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
               ) : (
                 <FolderSearch className="w-3.5 h-3.5" />
               )}
-              <span>অফলাইন ফাইল যুক্ত করুন</span>
+              <span>অফলাইন ফাইল স্ক্যান</span>
             </button>
           )}
         </div>
+
+        {scanProgress?.active && (
+          <div className="rounded-2xl bg-slate-900/90 border border-cyan-500/30 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-cyan-300">
+            <div className="flex items-center gap-2 min-w-0">
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+              <span className="truncate">
+                ধীরে ধীরে ফাইল স্ক্যান হচ্ছে ({scanProgress.scanned}/{scanProgress.total})...
+              </span>
+            </div>
+            {scanProgress.matched > 0 && (
+              <span className="shrink-0 font-mono-num text-emerald-300 font-semibold">
+                {scanProgress.matched}টি পাওয়া গেছে
+              </span>
+            )}
+          </div>
+        )}
+
+        {!scanProgress?.active && pendingReinstallCount > 0 && onScanDeviceFiles && !scanMessage && (
+          <div className="rounded-2xl bg-slate-900/90 border border-amber-500/35 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-amber-200">
+            <span className="min-w-0">
+              আগের ডাউনলোড করা {pendingReinstallCount}টি ক্লাস ফোনে থাকতে পারে — ১ ক্লিকে স্ক্যান করুন।
+            </span>
+            <button
+              type="button"
+              onClick={() => filePickerRef.current?.click()}
+              className="shrink-0 px-2.5 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-[11px]"
+            >
+              স্ক্যান করুন
+            </button>
+          </div>
+        )}
 
         {scanMessage && (
           <div className="rounded-2xl bg-slate-900/90 border border-emerald-500/30 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-emerald-300">
@@ -339,7 +379,7 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
               ) : (
                 <FolderSearch className="w-3.5 h-3.5" />
               )}
-              <span className="hidden sm:inline">অফলাইন ফাইল</span>
+              <span className="text-[11px] sm:text-xs">স্ক্যান</span>
             </button>
           )}
           {(selectedDoc?.description || sectionsWithTitles.length > 0) && (
@@ -357,6 +397,22 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
           )}
         </div>
       </div>
+
+      {scanProgress?.active && (
+        <div className="rounded-2xl bg-slate-900/90 border border-cyan-500/30 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-cyan-300">
+          <div className="flex items-center gap-2 min-w-0">
+            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+            <span className="truncate">
+              ধীরে ধীরে ফাইল স্ক্যান হচ্ছে ({scanProgress.scanned}/{scanProgress.total})...
+            </span>
+          </div>
+          {scanProgress.matched > 0 && (
+            <span className="shrink-0 font-mono-num text-emerald-300 font-semibold">
+              {scanProgress.matched}টি পাওয়া গেছে
+            </span>
+          )}
+        </div>
+      )}
 
       {scanMessage && (
         <div className="rounded-2xl bg-slate-900/90 border border-emerald-500/30 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-emerald-300">
@@ -595,10 +651,15 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                                     classNumber: currentClassNum,
                                   });
                                 }}
-                                className="flex-1 h-12 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/15 active:scale-[0.98] transition relative"
+                                className="flex-1 h-12 px-3 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm flex items-center justify-between gap-2 shadow-lg shadow-emerald-500/15 active:scale-[0.98] transition relative"
                               >
-                                <Play className="w-4 h-4 fill-current shrink-0" />
-                                <span>দেখুন</span>
+                                <span className="flex items-center gap-1.5 min-w-0">
+                                  <Play className="w-4 h-4 fill-current shrink-0" />
+                                  <span className="px-1.5 py-0.5 rounded-md bg-slate-950/20 text-[11px] font-extrabold shrink-0">
+                                    ভিডিও
+                                  </span>
+                                  <span className="truncate">দেখুন</span>
+                                </span>
                                 {hasDownloadedVideo && (
                                   <span
                                     className="w-5 h-5 rounded-full bg-slate-950 text-emerald-400 flex items-center justify-center shrink-0 shadow-sm"
@@ -634,10 +695,13 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                                         classNumber: currentClassNum,
                                       });
                                     }}
-                                    className="flex-1 h-12 px-3 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-md active:scale-[0.98] transition shrink-0"
+                                    className="flex-1 h-12 px-2.5 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-md active:scale-[0.98] transition shrink-0"
                                   >
                                     <Play className="w-3.5 h-3.5 fill-current shrink-0" />
-                                    <span>পার্ট {vIdx + 1}</span>
+                                    <span className="px-1 py-0.5 rounded bg-slate-950/20 text-[10px] font-extrabold shrink-0">
+                                      ভিডিও
+                                    </span>
+                                    <span>পার্ট {vIdx + 1} · দেখুন</span>
                                     {hasDownloadedVideo && (
                                       <span
                                         className="w-4 h-4 rounded-full bg-slate-950 text-emerald-400 flex items-center justify-center shrink-0"
