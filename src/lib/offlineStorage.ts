@@ -159,6 +159,32 @@ export async function listOfflineMedia(): Promise<OfflineMediaEntry[]> {
   });
 }
 
+export function getSafeDownloadUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl) return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+
+  const driveFileMatch = trimmed.match(/drive\.google\.com\/file\/d\/([^\/?#]+)/i);
+  if (driveFileMatch && driveFileMatch[1]) {
+    return `https://drive.google.com/uc?export=download&id=${driveFileMatch[1]}`;
+  }
+
+  const driveQueryMatch = trimmed.match(/drive\.google\.com\/.*[?&]id=([^&]+)/i);
+  if (driveQueryMatch && driveQueryMatch[1]) {
+    return `https://drive.google.com/uc?export=download&id=${driveQueryMatch[1]}`;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.toString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export function normalizeMediaUrl(rawUrl: string): string {
   const trimmed = (rawUrl || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
   if (!trimmed) return '';
