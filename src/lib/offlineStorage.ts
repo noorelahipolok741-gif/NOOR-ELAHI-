@@ -159,29 +159,174 @@ export async function listOfflineMedia(): Promise<OfflineMediaEntry[]> {
   });
 }
 
-export function getSafeDownloadUrl(rawUrl?: string | null): string | null {
+export function getGoogleDriveFileId(rawUrl?: string | null): string | null {
   if (!rawUrl) return null;
-  const trimmed = rawUrl.trim();
+  const trimmed = rawUrl.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
   if (!trimmed) return null;
 
-  const driveFileMatch = trimmed.match(/drive\.google\.com\/file\/d\/([^\/?#]+)/i);
-  if (driveFileMatch && driveFileMatch[1]) {
-    return `https://drive.google.com/uc?export=download&id=${driveFileMatch[1]}`;
-  }
+  // Match /file/d/FILE_ID or /d/FILE_ID
+  const pathIdMatch =
+    trimmed.match(/drive\.google\.com\/file\/(?:u\/\d+\/)?d\/([a-zA-Z0-9_-]+)/i) ||
+    trimmed.match(/docs\.google\.com\/file\/(?:u\/\d+\/)?d\/([a-zA-Z0-9_-]+)/i) ||
+    trimmed.match(/drive\.google\.com\/(?:u\/\d+\/)?d\/([a-zA-Z0-9_-]+)/i);
+  if (pathIdMatch?.[1]) return pathIdMatch[1];
 
-  const driveQueryMatch = trimmed.match(/drive\.google\.com\/.*[?&]id=([^&]+)/i);
-  if (driveQueryMatch && driveQueryMatch[1]) {
-    return `https://drive.google.com/uc?export=download&id=${driveQueryMatch[1]}`;
+  // Match ?id=FILE_ID or &id=FILE_ID on drive.google.com / docs.google.com / drive.usercontent.google.com
+  const queryIdMatch = trimmed.match(
+    /(?:drive\.google\.com|docs\.google\.com|drive\.usercontent\.google\.com)\/[^\s]*[?&]id=([a-zA-Z0-9_-]+)/i
+  );
+  if (queryIdMatch?.[1]) return queryIdMatch[1];
+
+  try {
+    const u = new URL(normalizeMediaUrl(trimmed));
+    if (
+      !u.hostname.includes('drive.google.com') &&
+      !u.hostname.includes('docs.google.com') &&
+      !u.hostname.includes('drive.usercontent.google.com')
+    ) {
+      return null;
+    }
+    if (u.pathname.includes('/folders/')) return null;
+    const pMatch =
+      u.pathname.match(/\/file(?:\/u\/\d+)?\/d\/([a-zA-Z0-9_-]+)/) ||
+      u.pathname.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    if (pMatch?.[1]) return pMatch[1];
+    const idParam = u.searchParams.get('id');
+    if (idParam && /^[a-zA-Z0-9_-]+$/.test(idParam)) return idParam;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function getSafeDownloadUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl) return null;
+  const trimmed = rawUrl.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  if (!trimmed || trimmed.startsWith('/') || trimmed.startsWith('#')) return null;
+
+  const driveId = getGoogleDriveFileId(trimmed);
+  if (driveId) {
+    return `https://drive.google.com/uc?export=download&id=${driveId}`;
   }
 
   try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-      return parsed.toString();
+    const normalized = normalizeMediaUrl(trimmed);
+    if (!normalized || normalized.startsWith('/')) return null;
+    const u = new URL(normalized);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return null;
+    }
+    if (u.hostname.includes('docs.google.com')) {
+      const m = u.pathname.match(/\/(document|presentation|spreadsheets)(?:\/u\/\d+)?\/d\/([a-zA-Z0-9_-]+)/);
+      if (m?.[1] && m?.[2]) {
+        return m[1] === 'presentation'
+          ? `https://docs.google.com/presentation/d/${m[2]}/export/pdf`
+          : `https://docs.google.com/${m[1]}/d/${m[2]}/export?format=pdf`;
+      }
+    }
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+export const getDownloadUrl = getSafeDownloadUrl;
+
+export function getVideoViewerUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl) return null;
+  const trimmed = rawUrl.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  if (!trimmed || trimmed.startsWith('/')) return null;
+
+  const driveId = getGoogleDriveFileId(trimmed);
+  if (driveId) {
+    return `https://drive.google.com/file/d/${driveId}/preview`;
+  }
+
+  const embedUrl = extractDirectVideoEmbedUrl(trimmed);
+  if (embedUrl) return embedUrl;
+
+  try {
+    const normalized = normalizeMediaUrl(trimmed);
+    const u = new URL(normalized);
+    if (u.protocol === 'http:' || u.protocol === 'https:') {
+      return u.toString();
     }
     return null;
   } catch {
     return null;
+  }
+}
+
+export function getPdfViewerUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl) return null;
+  const trimmed = rawUrl.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  if (!trimmed || trimmed.startsWith('/')) return null;
+
+  const driveId = getGoogleDriveFileId(trimmed);
+  if (driveId) {
+    return `https://drive.google.com/file/d/${driveId}/preview`;
+  }
+
+  const docsPreview = extractGoogleDocsPreviewUrl(trimmed);
+  if (docsPreview) return docsPreview;
+
+  try {
+    const normalized = normalizeMediaUrl(trimmed);
+    const u = new URL(normalized);
+    if (u.protocol === 'http:' || u.protocol === 'https:') {
+      return u.toString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function isDirectVideoFileUrl(rawUrl?: string | null): boolean {
+  if (!rawUrl) return false;
+  if (getGoogleDriveFileId(rawUrl)) return false;
+  if (extractDirectVideoEmbedUrl(rawUrl)) return false;
+  try {
+    const normalized = normalizeMediaUrl(rawUrl);
+    const u = new URL(normalized);
+    const host = u.hostname.toLowerCase();
+    const pathLower = u.pathname.toLowerCase();
+    if (/\.(mp4|webm|ogg|ogv|m4v|mov)(\?.*)?$/i.test(pathLower)) {
+      return true;
+    }
+    if (
+      host.includes('dropbox.com') ||
+      host.includes('dl.dropboxusercontent.com') ||
+      host.includes('pixeldrain.com') ||
+      host.includes('raw.githubusercontent.com')
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function safeOpenExternalUrl(rawUrl?: string | null): boolean {
+  if (!rawUrl || typeof document === 'undefined') return false;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed.startsWith('/')) return false;
+  if (!/^https?:\/\//i.test(trimmed) && !trimmed.startsWith('blob:')) {
+    return false;
+  }
+  try {
+    const a = document.createElement('a');
+    a.href = trimmed;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -235,25 +380,7 @@ export function normalizeMediaUrl(rawUrl: string): string {
 }
 
 export function extractGoogleDriveFileId(rawUrl: string): string | null {
-  try {
-    const u = new URL(normalizeMediaUrl(rawUrl));
-    if (
-      !u.hostname.includes('drive.google.com') &&
-      !u.hostname.includes('docs.google.com') &&
-      !u.hostname.includes('drive.usercontent.google.com')
-    ) {
-      return null;
-    }
-    const pathMatch =
-      u.pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) ||
-      u.pathname.match(/\/d\/([a-zA-Z0-9_-]+)/);
-    if (pathMatch?.[1]) return pathMatch[1];
-    const idParam = u.searchParams.get('id');
-    if (idParam && /^[a-zA-Z0-9_-]+$/.test(idParam)) return idParam;
-    return null;
-  } catch {
-    return null;
-  }
+  return getGoogleDriveFileId(rawUrl);
 }
 
 export function extractGoogleDocsPreviewUrl(rawUrl: string): string | null {
@@ -265,7 +392,7 @@ export function extractGoogleDocsPreviewUrl(rawUrl: string): string | null {
         return `https://docs.google.com/${m[1]}/d/${m[2]}/preview`;
       }
     }
-    const driveId = extractGoogleDriveFileId(rawUrl);
+    const driveId = getGoogleDriveFileId(rawUrl);
     if (driveId) {
       return `https://drive.google.com/file/d/${driveId}/preview`;
     }
@@ -286,9 +413,9 @@ export function extractGoogleDriveDownloadUrl(rawUrl: string): string | null {
           : `https://docs.google.com/${m[1]}/d/${m[2]}/export?format=pdf`;
       }
     }
-    const driveId = extractGoogleDriveFileId(rawUrl);
+    const driveId = getGoogleDriveFileId(rawUrl);
     if (driveId) {
-      return `https://drive.usercontent.google.com/download?id=${driveId}&export=download&confirm=t`;
+      return `https://drive.google.com/uc?export=download&id=${driveId}`;
     }
     return null;
   } catch {
@@ -387,8 +514,11 @@ export function encodeProxyParam(url: string): string {
 export function resolveStreamUrl(rawUrl: string, kind?: 'video' | 'pdf'): string {
   const normalized = normalizeMediaUrl(rawUrl);
   if (!normalized) return '';
-  if (normalized.startsWith('blob:') || normalized.startsWith('data:') || normalized.startsWith('/')) {
+  if (normalized.startsWith('blob:') || normalized.startsWith('data:') || normalized.startsWith('/api/')) {
     return normalized;
+  }
+  if (normalized.startsWith('/')) {
+    return '';
   }
   if (isHlsUrl(normalized)) {
     return normalized;
@@ -399,15 +529,18 @@ export function resolveStreamUrl(rawUrl: string, kind?: 'video' | 'pdf'): string
 
 export function resolveHlsProxyUrl(rawUrl: string): string {
   const normalized = normalizeMediaUrl(rawUrl);
-  if (!normalized) return '';
+  if (!normalized || normalized.startsWith('/')) return '';
   return `/api/proxy-hls?u=${encodeURIComponent(encodeProxyParam(normalized))}`;
 }
 
 export function resolveDownloadProxyUrl(rawUrl: string, filename: string, kind?: 'video' | 'pdf'): string {
   const normalized = normalizeMediaUrl(rawUrl);
   if (!normalized) return '';
-  if (normalized.startsWith('blob:') || normalized.startsWith('data:') || normalized.startsWith('/')) {
+  if (normalized.startsWith('blob:') || normalized.startsWith('data:') || normalized.startsWith('/api/')) {
     return normalized;
+  }
+  if (normalized.startsWith('/')) {
+    return '';
   }
   const kindParam = kind ? `&kind=${kind}` : '';
   return `/api/proxy-media?u=${encodeURIComponent(encodeProxyParam(normalized))}&filename=${encodeURIComponent(filename)}&download=1${kindParam}`;

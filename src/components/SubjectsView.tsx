@@ -154,7 +154,10 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
             let pdfCount = 0;
             for (const sec of sections) {
               for (const item of sec.items || []) {
-                if (item.videoUrl?.trim()) videoCount += 1;
+                const hasAnyVid =
+                  (item.videoUrls && item.videoUrls.some((u) => Boolean(u?.trim()))) ||
+                  Boolean(item.videoUrl?.trim());
+                if (hasAnyVid) videoCount += 1;
                 if (item.pdfUrl?.trim()) pdfCount += 1;
               }
             }
@@ -463,94 +466,85 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
 
                           <div className="space-y-2.5">
                             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                              {(() => {
-                                const videoLinks = (item.videoUrls && item.videoUrls.length > 0)
-                                  ? item.videoUrls.filter(Boolean)
-                                  : (item.videoUrl?.trim() ? [item.videoUrl.trim()] : []);
-                                const hasVideo = videoLinks.length > 0;
-
-                                if (!hasVideo) {
-                                  return (
-                                    <div className="flex-1 min-h-[48px] px-3 rounded-2xl bg-slate-900/75 border border-dashed border-slate-700/80 flex items-center justify-center text-center text-xs font-medium text-slate-400">
-                                      কোন ভিডিও দেওয়া হয়নি
-                                    </div>
-                                  );
-                                }
-
-                                if (videoLinks.length === 1) {
-                                  return (
+                              {!hasVideo ? (
+                                <div className="flex-1 min-h-[48px] px-3 rounded-2xl bg-slate-900/75 border border-dashed border-slate-700/80 flex items-center justify-center text-center text-xs font-medium text-slate-400">
+                                  কোন ভিডিও দেওয়া হয়নি
+                                </div>
+                              ) : videoLinks.length === 1 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (!isOnline && !hasDownloadedVideo) {
+                                      onOfflineAlert();
+                                      return;
+                                    }
+                                    onPlayVideo({
+                                      item: { ...item, videoUrl: videoLinks[0], name: displayName },
+                                      subjectId: selectedMeta.id,
+                                      sectionId: section.id,
+                                      sectionTitle: section.title || selectedMeta.name,
+                                      classNumber: currentClassNum,
+                                    });
+                                  }}
+                                  className="flex-1 h-12 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/15 active:scale-[0.98] transition relative"
+                                >
+                                  <Play className="w-4 h-4 fill-current shrink-0" />
+                                  <span>দেখুন</span>
+                                  {hasDownloadedVideo && (
+                                    <CheckCircle2 className="w-4 h-4 text-slate-950 shrink-0 ml-0.5" />
+                                  )}
+                                </button>
+                              ) : (
+                                <div className="flex-1 flex items-center gap-1.5 overflow-x-auto">
+                                  {videoLinks.map((vUrl, vIdx) => (
                                     <button
+                                      key={vIdx}
                                       type="button"
                                       onClick={() => {
-                                        if (!isOnline && !isDownloaded) {
+                                        if (!isOnline && !hasDownloadedVideo) {
                                           onOfflineAlert();
                                           return;
                                         }
                                         onPlayVideo({
-                                          item: { ...item, videoUrl: videoLinks[0], name: displayName },
+                                          item: { ...item, videoUrl: vUrl, name: `${displayName} (পার্ট ${vIdx + 1})` },
                                           subjectId: selectedMeta.id,
                                           sectionId: section.id,
                                           sectionTitle: section.title || selectedMeta.name,
                                           classNumber: currentClassNum,
                                         });
                                       }}
-                                      className="flex-1 h-12 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/15 active:scale-[0.98] transition relative"
+                                      className="flex-1 h-12 px-3 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-md active:scale-[0.98] transition shrink-0"
                                     >
-                                      <Play className="w-4 h-4 fill-current shrink-0" />
-                                      <span>দেখুন</span>
+                                      <Play className="w-3.5 h-3.5 fill-current shrink-0" />
+                                      <span>পার্ট {vIdx + 1}</span>
                                       {hasDownloadedVideo && (
-                                        <CheckCircle2 className="w-4 h-4 text-slate-950 shrink-0 ml-0.5" />
+                                        <CheckCircle2 className="w-3.5 h-3.5 text-slate-950 shrink-0" />
                                       )}
                                     </button>
-                                  );
-                                }
-
-                                return (
-                                  <div className="flex-1 flex items-center gap-1.5 overflow-x-auto">
-                                    {videoLinks.map((vUrl, vIdx) => (
-                                      <button
-                                        key={vIdx}
-                                        type="button"
-                                        onClick={() => {
-                                          if (!isOnline && !isDownloaded) {
-                                            onOfflineAlert();
-                                            return;
-                                          }
-                                          onPlayVideo({
-                                            item: { ...item, videoUrl: vUrl, name: `${displayName} (পার্ট ${vIdx + 1})` },
-                                            subjectId: selectedMeta.id,
-                                            sectionId: section.id,
-                                            sectionTitle: section.title || selectedMeta.name,
-                                            classNumber: currentClassNum,
-                                          });
-                                        }}
-                                        className="flex-1 h-12 px-3 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-md active:scale-[0.98] transition shrink-0"
-                                      >
-                                        <Play className="w-3.5 h-3.5 fill-current shrink-0" />
-                                        <span>পার্ট {vIdx + 1}</span>
-                                      </button>
-                                    ))}
-                                  </div>
-                                );
-                              })()}
+                                  ))}
+                                </div>
+                              )}
 
                               {hasPdf ? (
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    if (!isOnline && !isDownloaded) {
+                                    if (!isOnline && !hasDownloadedPdf) {
                                       onOfflineAlert();
                                       return;
                                     }
                                     onOpenPdf({
                                       item: { ...item, name: displayName },
-                                      isDownloaded,
+                                      isDownloaded: hasDownloadedPdf,
                                     });
                                   }}
                                   className="h-12 px-4 rounded-2xl bg-slate-900 border border-indigo-500/35 hover:border-indigo-400 text-indigo-300 font-semibold text-xs flex items-center justify-center gap-1.5 transition shrink-0"
                                 >
                                   <FileText className="w-4 h-4 shrink-0" />
                                   <span>PDF</span>
+                                  {hasDownloadedPdf && (
+                                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                  )}
                                 </button>
                               ) : (
                                 <div className="min-h-[48px] px-3.5 rounded-2xl bg-slate-900/75 border border-dashed border-slate-700/80 flex items-center justify-center text-center text-xs font-medium text-slate-400 shrink-0">
@@ -567,7 +561,7 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                                 sectionTitle={section.title || selectedMeta.name}
                                 classNumber={currentClassNum}
                                 videoName={displayName}
-                                videoUrl={item.videoUrl || ''}
+                                videoUrl={videoLinks[0] || item.videoUrl || ''}
                                 pdfUrl={item.pdfUrl}
                                 isDownloaded={isDownloaded}
                                 task={activeTask}

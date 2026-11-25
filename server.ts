@@ -1268,6 +1268,10 @@ async function startServer() {
         res.json({ type: 'embed', embedUrl: resolved.embedUrl });
         return;
       }
+      if (resolved.previewUrl) {
+        res.json({ type: 'embed', embedUrl: resolved.previewUrl });
+        return;
+      }
 
       res.status(resolved.statusCode || 422).json({
         type: 'error',

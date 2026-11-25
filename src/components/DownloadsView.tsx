@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ChevronRight,
   Download,
+  ExternalLink,
   FileText,
   FolderSearch,
   HardDrive,
@@ -26,6 +27,7 @@ import { downloadManager } from '../lib/downloadManager';
 import {
   collectFilesFromDirectoryHandle,
   exportOfflineItemToPhone,
+  getSafeDownloadUrl,
   getStoragePermissionStatus,
   requestInternalFolderHandle,
   scanAndRestoreFilesFromDevice,
@@ -235,14 +237,27 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     {task.status === 'error' ? (
-                      <button
-                        type="button"
-                        onClick={() => downloadManager.retryTask(task.itemId)}
-                        className="px-3 h-9 rounded-xl bg-rose-500 text-white text-xs font-bold flex items-center gap-1"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>আবার</span>
-                      </button>
+                      <>
+                        {(getSafeDownloadUrl(task.videoUrl) || getSafeDownloadUrl(task.pdfUrl)) && (
+                          <a
+                            href={getSafeDownloadUrl(task.videoUrl) || getSafeDownloadUrl(task.pdfUrl) || '#'}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-2.5 h-9 rounded-xl bg-cyan-500 text-slate-950 text-xs font-bold flex items-center gap-1"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>সেভ</span>
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => downloadManager.retryTask(task.itemId)}
+                          className="px-3 h-9 rounded-xl bg-rose-500 text-white text-xs font-bold flex items-center gap-1"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>আবার</span>
+                        </button>
+                      </>
                     ) : (
                       <button
                         type="button"

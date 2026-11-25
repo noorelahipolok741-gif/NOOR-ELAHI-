@@ -16,11 +16,11 @@ import {
 } from 'lucide-react';
 import {
   extractGoogleDocsPreviewUrl,
-  extractGoogleDriveDownloadUrl,
-  extractGoogleDriveFileId,
+  getGoogleDriveFileId,
   getOfflineMedia,
+  getPdfViewerUrl,
+  getSafeDownloadUrl,
   normalizeMediaUrl,
-  resolveDownloadProxyUrl,
   resolveStreamUrl,
   sanitizeBaseFilename,
 } from '../lib/offlineStorage';
@@ -455,22 +455,23 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       }
 
       const normalized = normalizeMediaUrl(pdfUrl);
-      if (!normalized) {
+      const safeDownload = getSafeDownloadUrl(pdfUrl);
+      if (!normalized || (!safeDownload && !normalized.startsWith('blob:') && !normalized.startsWith('data:'))) {
         if (!cancelled) {
-          setErrorMsg('PDF লিংক পাওয়া যায়নি।');
+          setErrorMsg('PDF লিংকটি সঠিক নয় বা পাওয়া যায়নি।');
           setLoading(false);
         }
         return;
       }
 
-      const drivePreviewCandidate = extractGoogleDocsPreviewUrl(normalized);
+      const drivePreviewCandidate = getPdfViewerUrl(normalized) || extractGoogleDocsPreviewUrl(normalized);
       const fetchTarget = resolveStreamUrl(normalized, 'pdf');
 
       try {
         const res = await fetch(fetchTarget, { signal: controller.signal });
         if (!res.ok) {
           // Try direct browser CORS fetch before falling back
-          if (/^https?:\/\//i.test(normalized) && !extractGoogleDriveFileId(normalized)) {
+          if (/^https?:\/\//i.test(normalized) && !getGoogleDriveFileId(normalized)) {
             try {
               const directRes = await fetch(normalized, { signal: controller.signal });
               if (directRes.ok) {
@@ -695,25 +696,22 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   if (!isOpen) return null;
 
   const normalizedPdfUrl = normalizeMediaUrl(pdfUrl);
+  const safePdfUrl = getSafeDownloadUrl(pdfUrl);
   const downloadFilename = `${sanitizeBaseFilename(title || 'document')}.pdf`;
-  const drivePreviewCandidate = extractGoogleDocsPreviewUrl(normalizedPdfUrl);
-  const directDriveDownload = extractGoogleDriveDownloadUrl(normalizedPdfUrl);
+  const drivePreviewCandidate = getPdfViewerUrl(normalizedPdfUrl) || extractGoogleDocsPreviewUrl(normalizedPdfUrl);
   const gviewFallbackUrl =
-    normalizedPdfUrl && /^https?:/i.test(normalizedPdfUrl)
-      ? `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(normalizedPdfUrl)}`
+    safePdfUrl
+      ? `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(safePdfUrl)}`
       : null;
 
   const directExternalHref =
     typeof navigator !== 'undefined' && !navigator.onLine && blobUrl
       ? blobUrl
-      : normalizedPdfUrl || (pdfBlob && blobUrl ? blobUrl : '');
+      : safePdfUrl || (pdfBlob && blobUrl ? blobUrl : '');
 
   const directSaveHref = blobUrl
     ? blobUrl
-    : directDriveDownload ||
-      (normalizedPdfUrl && /^https?:/i.test(normalizedPdfUrl)
-        ? resolveDownloadProxyUrl(normalizedPdfUrl, downloadFilename, 'pdf')
-        : '');
+    : safePdfUrl || '';
 
   const handleCopyLink = async () => {
     if (!normalizedPdfUrl) return;
@@ -920,20 +918,22 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                   <span>অনলাইন ভিউয়ার</span>
                 </button>
               )}
-              {blobUrl && (
+              {directSaveHref && (
                 <a
-                  href={blobUrl}
-                  download={downloadFilename}
+                  href={directSaveHref}
+                  download={blobUrl ? downloadFilename : undefined}
+                  target={blobUrl ? undefined : '_blank'}
+                  rel={blobUrl ? undefined : 'noopener noreferrer'}
                   className="px-4 py-2.5 rounded-xl bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>PDF সেভ করুন</span>
                 </a>
               )}
-              {normalizedPdfUrl && (
+              {safePdfUrl && (
                 <>
                   <a
-                    href={directExternalHref || normalizedPdfUrl}
+                    href={directExternalHref || safePdfUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5"

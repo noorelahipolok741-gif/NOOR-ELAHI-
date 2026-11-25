@@ -3,6 +3,7 @@ import {
   AlertCircle,
   CheckCircle2,
   Download,
+  ExternalLink,
   Pause,
   Play,
   RotateCcw,
@@ -10,7 +11,12 @@ import {
 } from 'lucide-react';
 import { DownloadTask } from '../types';
 import { downloadManager } from '../lib/downloadManager';
-import { exportOfflineItemToPhone } from '../lib/offlineStorage';
+import {
+  exportOfflineItemToPhone,
+  getGoogleDriveFileId,
+  getSafeDownloadUrl,
+  safeOpenExternalUrl,
+} from '../lib/offlineStorage';
 
 interface LiquidDownloadBoxProps {
   itemId: string;
@@ -48,7 +54,17 @@ export const LiquidDownloadBox: React.FC<LiquidDownloadBoxProps> = ({
 }) => {
   const [exportedNotice, setExportedNotice] = useState(false);
 
+  const safeVideoDlUrl = getSafeDownloadUrl(videoUrl);
+  const safePdfDlUrl = getSafeDownloadUrl(pdfUrl);
+  const fallbackExternalUrl = safeVideoDlUrl || safePdfDlUrl;
+
   const beginDownload = () => {
+    // Synchronously hand Google Drive videos to native mobile browser download manager
+    // so 600-700MB files download cleanly without 404 or mobile memory crashes
+    if (videoUrl && getGoogleDriveFileId(videoUrl) && safeVideoDlUrl) {
+      safeOpenExternalUrl(safeVideoDlUrl);
+    }
+
     downloadManager.startDownload({
       itemId,
       subjectId,
@@ -101,6 +117,18 @@ export const LiquidDownloadBox: React.FC<LiquidDownloadBoxProps> = ({
             </span>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
+            {fallbackExternalUrl && (
+              <a
+                href={fallbackExternalUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-2.5 py-1.5 rounded-xl bg-cyan-500 text-slate-950 text-[11px] font-bold flex items-center gap-1 active:scale-95 transition"
+                title="ব্রাউজারে সরাসরি ডাউনলোড করুন"
+              >
+                <ExternalLink className="w-3 h-3" />
+                <span>সেভ</span>
+              </a>
+            )}
             <button
               type="button"
               onClick={() => downloadManager.retryTask(itemId)}

@@ -16,11 +16,15 @@ import { DownloadTask } from '../types';
 import {
   encodeProxyParam,
   extractDirectVideoEmbedUrl,
+  getGoogleDriveFileId,
   getOfflineMedia,
+  getSafeDownloadUrl,
+  isDirectVideoFileUrl,
   isHlsUrl,
   normalizeMediaUrl,
   resolveHlsProxyUrl,
   resolveStreamUrl,
+  safeOpenExternalUrl,
 } from '../lib/offlineStorage';
 import { LiquidDownloadBox } from './LiquidDownloadBox';
 
@@ -130,13 +134,30 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
       if (cancelled) return;
 
       if (!usingOfflineBlob) {
-        const directEmbed = extractDirectVideoEmbedUrl(videoUrl);
+        const cleanRaw = (videoUrl || '').trim();
+        const safeExternal = getSafeDownloadUrl(cleanRaw);
+        const driveId = getGoogleDriveFileId(cleanRaw);
+
+        if (driveId) {
+          setEmbedUrl(`https://drive.google.com/file/d/${driveId}/preview`);
+          setIsBuffering(false);
+          return;
+        }
+
+        const directEmbed = extractDirectVideoEmbedUrl(cleanRaw);
         if (directEmbed) {
           setEmbedUrl(directEmbed);
           setIsBuffering(false);
           return;
         }
-        sourceUrl = resolveStreamUrl(videoUrl, 'video');
+
+        if (!cleanRaw || (!safeExternal && !cleanRaw.startsWith('blob:') && !cleanRaw.startsWith('data:'))) {
+          setIsBuffering(false);
+          setPlayerError('ভিডিও লিংকটি সঠিক নয় বা পাওয়া যায়নি।');
+          return;
+        }
+
+        sourceUrl = resolveStreamUrl(cleanRaw, 'video');
       }
 
       const videoEl = videoRef.current;
@@ -395,9 +416,10 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
         void triggerSmartResolutionOrError();
       };
 
-      if (!usingOfflineBlob && isHlsUrl(sourceUrl)) {
-        startHlsPlayback(sourceUrl, true);
-      } else {
+      const normalizedInput = normalizeMediaUrl(videoUrl);
+      if (!usingOfflineBlob && isHlsUrl(normalizedInput)) {
+        startHlsPlayback(normalizedInput, true);
+      } else if (usingOfflineBlob || isDirectVideoFileUrl(videoUrl) || videoUrl.startsWith('blob:') || videoUrl.startsWith('data:')) {
         setupPlyrInstance();
         videoEl.src = sourceUrl;
         videoEl.load();
@@ -405,6 +427,9 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
           setIsBuffering(false);
           setPlayerError(null);
         }
+      } else {
+        // Non-direct webpage URL: resolve embed / HLS / direct stream cleanly first
+        void triggerSmartResolutionOrError();
       }
     }
 
@@ -489,15 +514,11 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   };
 
   const openExternalVideo = () => {
-    const target = normalizeMediaUrl(videoUrl);
-    if (!target) return;
-    const a = document.createElement('a');
-    a.href = target;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    const driveId = getGoogleDriveFileId(videoUrl);
+    const target = driveId
+      ? `https://drive.google.com/file/d/${driveId}/view`
+      : getSafeDownloadUrl(videoUrl) || normalizeMediaUrl(videoUrl);
+    safeOpenExternalUrl(target);
   };
 
   return (
