@@ -560,11 +560,11 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
           className="relative rounded-2xl overflow-hidden bg-black border border-slate-800 shadow-2xl"
         >
           {embedUrl ? (
-            <div className="relative w-full aspect-video bg-black">
+            <div className="relative w-full h-[320px] sm:h-[480px] md:h-[550px] max-h-[76dvh] bg-black pb-2">
               <iframe
                 src={embedUrl}
                 title={videoName}
-                className="w-full h-full border-0"
+                className="w-full h-full border-0 block"
                 allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
                 allowFullScreen
                 referrerPolicy="no-referrer-when-downgrade"

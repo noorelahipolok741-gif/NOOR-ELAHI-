@@ -565,10 +565,31 @@ class DownloadManager {
           state.task.progress = 96;
           state.pdfDone = true;
           this.emit(true);
-        } else if (!hasVideoAlready) {
-          throw new Error(pdfFailureReason || 'PDF ডাউনলোড করা যায়নি।');
-        } else {
+        } else if (hasVideoAlready) {
           state.pdfDone = true;
+        } else if (getGoogleDriveFileId(state.task.pdfUrl) || isDriveVideo) {
+          this.clearTicker(state);
+          state.task.progress = 100;
+          state.task.status = 'completed';
+          state.task.handoffNotice = isDriveVideo
+            ? 'ভিডিও ডাউনলোড শুরু হয়েছে'
+            : 'ড্রাইভ / ব্রাউজারে PDF ডাউনলোড শুরু হয়েছে';
+          if (isDriveVideo) {
+            state.task.handoffPdfUrl = getSafeDownloadUrl(state.task.pdfUrl) || undefined;
+          }
+          this.emit(true);
+          window.setTimeout(() => {
+            this.tasks.delete(itemId);
+            this.emit(true);
+            this.pumpQueue();
+          }, isDriveVideo ? 10000 : 3500);
+          return;
+        } else {
+          throw new Error(
+            pdfFailureReason && !pdfFailureReason.includes('404')
+              ? pdfFailureReason
+              : 'সরাসরি অ্যাপে লোড হয়নি; পাশের "সেভ" বাটনে ক্লিক করে ব্রাউজার থেকে ডাউনলোড করুন।'
+          );
         }
       }
 

@@ -59,10 +59,15 @@ export const LiquidDownloadBox: React.FC<LiquidDownloadBoxProps> = ({
   const fallbackExternalUrl = safeVideoDlUrl || safePdfDlUrl;
 
   const beginDownload = () => {
-    // Synchronously hand Google Drive videos to native mobile browser download manager
-    // so 600-700MB files download cleanly without 404 or mobile memory crashes
-    if (videoUrl && getGoogleDriveFileId(videoUrl) && safeVideoDlUrl) {
+    // Synchronously hand Google Drive files to native mobile browser / Drive app download manager
+    // so Drive account selection & background downloads work cleanly without any app error
+    const isDriveVideo = Boolean(videoUrl && getGoogleDriveFileId(videoUrl) && safeVideoDlUrl);
+    const isDrivePdf = Boolean(pdfUrl && getGoogleDriveFileId(pdfUrl) && safePdfDlUrl);
+
+    if (isDriveVideo && safeVideoDlUrl) {
       safeOpenExternalUrl(safeVideoDlUrl);
+    } else if (isDrivePdf && safePdfDlUrl) {
+      safeOpenExternalUrl(safePdfDlUrl);
     }
 
     downloadManager.startDownload({
@@ -147,6 +152,37 @@ export const LiquidDownloadBox: React.FC<LiquidDownloadBoxProps> = ({
             </button>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  if (task && task.status === 'completed' && (task.handoffNotice || task.handoffPdfUrl)) {
+    return (
+      <div className="w-full flex items-center gap-2">
+        <div className="flex-1 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center gap-2 px-3 text-emerald-300 font-semibold text-xs select-none min-w-0">
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+          <span className="truncate">{task.handoffNotice || 'ড্রাইভে ডাউনলোড শুরু হয়েছে'}</span>
+        </div>
+        {task.handoffPdfUrl && (
+          <a
+            href={task.handoffPdfUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="h-12 px-3 rounded-2xl bg-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shrink-0 active:scale-95 transition"
+            title="Google Drive থেকে PDF ডাউনলোড করুন"
+          >
+            <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+            <span>PDF ডাউনলোড</span>
+          </a>
+        )}
+        <button
+          type="button"
+          onClick={() => downloadManager.cancelTask(itemId)}
+          className="h-12 w-10 rounded-2xl bg-slate-900 border border-slate-700 text-slate-400 hover:text-white flex items-center justify-center shrink-0"
+          aria-label="বন্ধ করুন"
+        >
+          <X className="w-4 h-4" />
+        </button>
       </div>
     );
   }

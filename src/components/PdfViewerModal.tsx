@@ -802,7 +802,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           {directSaveHref && (
             <a
               href={directSaveHref}
-              download={downloadFilename}
+              download={blobUrl ? downloadFilename : undefined}
               target={blobUrl ? undefined : '_blank'}
               rel={blobUrl ? undefined : 'noopener noreferrer'}
               className="flex items-center gap-1 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 px-2.5 py-2 text-xs font-semibold text-emerald-300 transition"

@@ -183,6 +183,8 @@ export interface DownloadTask {
   downloadedBytes: number;
   totalBytes: number;
   errorMessage?: string;
+  handoffNotice?: string;
+  handoffPdfUrl?: string;
 }
 
 export interface AppNotification {
