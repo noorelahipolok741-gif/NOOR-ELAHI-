@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies and Capacitor
         run: |
-          npm ci
+          npm install
           npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/filesystem
 
       - name: Build web app
