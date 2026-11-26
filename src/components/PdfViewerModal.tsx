@@ -25,6 +25,7 @@ import {
   sanitizeBaseFilename,
   saveOfflineBlobForClass,
 } from '../lib/offlineStorage';
+import { readNativePdfAsBlob } from '../lib/capacitorScanner';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
@@ -34,6 +35,7 @@ interface PdfViewerModalProps {
   title: string;
   itemId: string;
   pdfUrl: string;
+  localPdfUri?: string;
   onOfflineCached?: (info: {
     itemId: string;
     fileSizeBytes: number;
@@ -321,6 +323,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   title,
   itemId,
   pdfUrl,
+  localPdfUri,
   onOfflineCached,
 }) => {
   const scrollWrapRef = useRef<HTMLDivElement | null>(null);
@@ -444,6 +447,25 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       setPdfBlob(null);
       setPdfDoc(null);
       setPageCount(0);
+
+      if (localPdfUri) {
+        try {
+          const nativeBlob = await readNativePdfAsBlob(localPdfUri);
+          if (nativeBlob && !cancelled && (await blobStartsWithPdfHeader(nativeBlob))) {
+            setPdfBlob(nativeBlob);
+            setLoading(false);
+            onOfflineCached?.({
+              itemId,
+              fileSizeBytes: nativeBlob.size,
+              hasLocalVideo: false,
+              hasLocalPdf: true,
+            });
+            return;
+          }
+        } catch {
+          // Fall back to IndexedDB or network
+        }
+      }
 
       try {
         const offline = await getOfflineMedia(itemId);
@@ -634,7 +656,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       cancelled = true;
       controller.abort();
     };
-  }, [isOpen, itemId, pdfUrl, reloadKey]);
+  }, [isOpen, itemId, pdfUrl, localPdfUri, reloadKey]);
 
   // Parse PDFDocumentProxy from Blob with fallback to Drive Preview if PDF.js fails on device
   useEffect(() => {

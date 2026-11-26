@@ -1,0 +1,18 @@
+{
+  "id": "/?source=pwa",
+  "short_name": "NOOR ELAHI",
+  "name": "NOOR ELAHI - ডিজিটাল লার্নিং প্ল্যাটফর্ম",
+  "icons": [
+    { "src": "/icon-192.png?v=5", "type": "image/png", "sizes": "192x192", "purpose": "any" },
+    { "src": "/icon-512.png?v=5", "type": "image/png", "sizes": "512x512", "purpose": "any" },
+    { "src": "/maskable-icon-512.png?v=5", "type": "image/png", "sizes": "512x512", "purpose": "maskable" },
+    { "src": "/icon.svg?v=5", "type": "image/svg+xml", "sizes": "any" }
+  ],
+  "start_url": "/",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "display": "standalone",
+  "orientation": "portrait",
+  "scope": "/",
+  "description": "বাংলাদেশের সকল শ্রেণির শিক্ষার্থীদের জন্য বিষয়ভিত্তিক স্মার্ট লার্নিং প্ল্যাটফর্ম।"
+}

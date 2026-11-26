@@ -5,6 +5,7 @@ export interface ClassItem {
   videoUrls?: string[];
   pdfUrl: string;
   duration?: string;
+  expectedSizeMB?: number;
   createdAt: number;
 }
 
@@ -166,6 +167,10 @@ export interface DownloadRecord {
   fileSizeBytes: number;
   hasLocalVideo?: boolean;
   hasLocalPdf?: boolean;
+  localVideoUri?: string;
+  localPdfUri?: string;
+  matchedFileName?: string;
+  matchScore?: number;
   downloadedAt?: unknown;
 }
 

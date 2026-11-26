@@ -286,6 +286,27 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
     );
   };
 
+  const updateSlotExpectedSizeMB = (
+    sectionId: string,
+    itemId: string,
+    rawVal: string
+  ) => {
+    const parsed = rawVal.trim() === '' ? undefined : Number(rawVal);
+    const safeVal = parsed !== undefined && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+    setDraftSections((prev) =>
+      prev.map((sec) =>
+        sec.id === sectionId
+          ? {
+              ...sec,
+              items: sec.items.map((it) =>
+                it.id === itemId ? { ...it, expectedSizeMB: safeVal } : it
+              ),
+            }
+          : sec
+      )
+    );
+  };
+
   const deleteSlot = (sectionId: string, itemId: string) => {
     setDraftSections((prev) =>
       prev.map((sec) =>
@@ -379,6 +400,10 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
             ...it,
             name: it.name.trim(),
             duration: (it.duration || '').trim(),
+            expectedSizeMB:
+              it.expectedSizeMB && Number(it.expectedSizeMB) > 0
+                ? Number(it.expectedSizeMB)
+                : undefined,
             videoUrl: normalizedVideoUrls[0] || '',
             videoUrls: normalizedVideoUrls,
             pdfUrl: it.pdfUrl.trim() ? normalizeMediaUrl(it.pdfUrl) : '',
@@ -616,7 +641,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                       key={item.id}
                       className="rounded-2xl bg-slate-950 border border-slate-800 p-3.5 space-y-2.5"
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs font-mono-num text-cyan-400 font-semibold shrink-0">
                           #{iIdx + 1}
                         </span>
@@ -626,8 +651,8 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                           onChange={(e) =>
                             updateSlotField(section.id, item.id, 'name', e.target.value)
                           }
-                          placeholder="ভিডিও ও ফাইলের নাম লিখুন (স্ক্যান ও স্টুডেন্টের জন্য)"
-                          className="flex-1 h-9 px-3 rounded-lg bg-slate-900 border border-slate-800 text-xs text-white outline-none focus:border-emerald-500"
+                          placeholder="ভিডিওর নাম (যেমন: Class-1 Physics)"
+                          className="flex-1 min-w-[160px] h-9 px-3 rounded-lg bg-slate-900 border border-slate-800 text-xs text-white outline-none focus:border-emerald-500"
                         />
                         <input
                           type="text"
@@ -635,8 +660,20 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                           onChange={(e) =>
                             updateSlotField(section.id, item.id, 'duration', e.target.value)
                           }
-                          placeholder="সময় (যেমন ১২ মি.)"
+                          placeholder="সময় (১২ মি.)"
                           className="w-24 h-9 px-2.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-200 outline-none"
+                        />
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={item.expectedSizeMB ?? ''}
+                          onChange={(e) =>
+                            updateSlotExpectedSizeMB(section.id, item.id, e.target.value)
+                          }
+                          placeholder="সাইজ MB"
+                          title="ঐচ্ছিক: ফাইল সাইজ (MB) দিলে অটো স্ক্যান আরও নিখুঁত হবে"
+                          className="w-20 h-9 px-2 rounded-lg bg-slate-900 border border-slate-800 text-xs text-cyan-200 placeholder:text-slate-500 outline-none"
                         />
                         <button
                           type="button"

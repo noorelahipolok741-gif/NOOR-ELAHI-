@@ -30,6 +30,10 @@ import {
   sanitizeBaseFilename,
   saveOfflineBlobForClass,
 } from '../lib/offlineStorage';
+import {
+  isNativeConvertedOrFileUrl,
+  toPlayableNativeSrc,
+} from '../lib/capacitorScanner';
 
 interface PlyrVideoPlayerProps {
   itemId: string;
@@ -44,6 +48,7 @@ interface PlyrVideoPlayerProps {
   initialPosition: number;
   isOnline: boolean;
   hasOfflineVideo?: boolean;
+  localVideoUri?: string;
   onSaveProgress: (itemId: string, currentTime: number, duration: number) => void;
   onOpenPdf: () => void;
   onOfflineCached?: (info: {
@@ -77,6 +82,7 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   initialPosition,
   isOnline,
   hasOfflineVideo = false,
+  localVideoUri,
   onSaveProgress,
   onOpenPdf,
   onOfflineCached,
@@ -132,29 +138,40 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
       setEmbedUrl(null);
 
       let sourceUrl = '';
-      let usingOfflineBlob = false;
+      let usingOfflineLocal = false;
 
-      try {
-        const offline = await getOfflineMedia(itemId);
-        if (offline?.videoBlob && offline.videoBlob.size > 0 && !cancelled) {
-          objectUrl = URL.createObjectURL(offline.videoBlob);
-          sourceUrl = objectUrl;
-          usingOfflineBlob = true;
+      if (localVideoUri) {
+        const converted = toPlayableNativeSrc(localVideoUri);
+        if (converted) {
+          sourceUrl = converted;
+          usingOfflineLocal = true;
           setOfflineSaved(true);
-          onOfflineCached?.({
-            itemId,
-            fileSizeBytes: offline.fileSizeBytes || offline.videoBlob.size,
-            hasLocalVideo: true,
-            hasLocalPdf: Boolean(offline.pdfBlob && offline.pdfBlob.size > 0),
-          });
         }
-      } catch {
-        // Continue to network URL
+      }
+
+      if (!usingOfflineLocal) {
+        try {
+          const offline = await getOfflineMedia(itemId);
+          if (offline?.videoBlob && offline.videoBlob.size > 0 && !cancelled) {
+            objectUrl = URL.createObjectURL(offline.videoBlob);
+            sourceUrl = objectUrl;
+            usingOfflineLocal = true;
+            setOfflineSaved(true);
+            onOfflineCached?.({
+              itemId,
+              fileSizeBytes: offline.fileSizeBytes || offline.videoBlob.size,
+              hasLocalVideo: true,
+              hasLocalPdf: Boolean(offline.pdfBlob && offline.pdfBlob.size > 0),
+            });
+          }
+        } catch {
+          // Continue to network URL
+        }
       }
 
       if (cancelled) return;
 
-      if (!usingOfflineBlob) {
+      if (!usingOfflineLocal) {
         const cleanRaw = (videoUrl || '').trim();
         const safeExternal = getSafeDownloadUrl(cleanRaw);
         const driveId = getGoogleDriveFileId(cleanRaw);
@@ -377,10 +394,19 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
       let resolvedAttempted = false;
       const triggerSmartResolutionOrError = async () => {
         if (cancelled) return;
-        if (usingOfflineBlob) {
+        if (usingOfflineLocal || isNativeConvertedOrFileUrl(sourceUrl)) {
+          // If online and a Drive preview fallback exists, fall back cleanly when local file was removed
+          const driveId = getGoogleDriveFileId(videoUrl);
+          if (isOnline && driveId) {
+            cleanupActivePlayer();
+            setEmbedUrl(`https://drive.google.com/file/d/${driveId}/preview`);
+            setIsBuffering(false);
+            setPlayerError(null);
+            return;
+          }
           setIsBuffering(false);
           setIsPlaying(false);
-          setPlayerError('অফলাইন ভিডিও ফাইলটি প্লে করা যায়নি। ফাইলটি সঠিক MP4/WebM ফরম্যাটে আছে কিনা দেখুন।');
+          setPlayerError('ফোনের Download ফোল্ডার থেকে অফলাইন ভিডিও ফাইলটি প্লে করা যায়নি।');
           return;
         }
         if (resolvedAttempted) {
@@ -444,9 +470,15 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
       };
 
       const normalizedInput = normalizeMediaUrl(videoUrl);
-      if (!usingOfflineBlob && isHlsUrl(normalizedInput)) {
+      if (!usingOfflineLocal && isHlsUrl(normalizedInput)) {
         startHlsPlayback(normalizedInput, true);
-      } else if (usingOfflineBlob || isDirectVideoFileUrl(videoUrl) || videoUrl.startsWith('blob:') || videoUrl.startsWith('data:')) {
+      } else if (
+        usingOfflineLocal ||
+        isNativeConvertedOrFileUrl(sourceUrl) ||
+        isDirectVideoFileUrl(videoUrl) ||
+        videoUrl.startsWith('blob:') ||
+        videoUrl.startsWith('data:')
+      ) {
         setupPlyrInstance();
         videoEl.src = sourceUrl;
         videoEl.load();
@@ -491,7 +523,7 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [itemId, videoUrl, reloadKey]);
+  }, [itemId, videoUrl, localVideoUri, reloadKey]);
 
   const togglePlayPause = () => {
     const player = plyrRef.current;
@@ -825,6 +857,11 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
                 ? `সময়কাল: ${durationLabel}`
                 : 'ভিডিও প্লেয়ার প্রস্তুত'}
             </p>
+            {offlineSaved && (
+              <p className="text-xs font-semibold text-emerald-300 pt-1">
+                ✅ ডাউনলোড করা আছে - অ্যাপ থেকে দেখো
+              </p>
+            )}
           </div>
 
           {pdfUrl ? (

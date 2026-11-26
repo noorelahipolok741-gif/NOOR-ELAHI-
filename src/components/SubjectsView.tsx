@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ArrowLeft,
   BookOpen,
@@ -7,13 +7,14 @@ import {
   ChevronRight,
   Cpu,
   FileText,
-  FolderSearch,
   Globe,
   Languages,
   Loader2,
   PenTool,
   Play,
   PlayCircle,
+  RefreshCw,
+  ShieldAlert,
   Sprout,
   X,
 } from 'lucide-react';
@@ -24,6 +25,7 @@ import {
   SubjectDoc,
   SubjectMeta,
 } from '../types';
+import { NativeStoragePermissionState } from '../lib/capacitorScanner';
 import { useBackOverlay } from '../hooks/useBackHandler';
 
 export interface OfflineTargetPayload {
@@ -50,14 +52,16 @@ interface SubjectsViewProps {
   }) => void;
   onOpenPdf: (payload: { item: ClassItem; isDownloaded: boolean }) => void;
   onOfflineAlert: (target?: OfflineTargetPayload) => void;
-  onScanDeviceFiles?: (files: File[]) => Promise<{ restoredCount: number }>;
+  isNativeCapacitor?: boolean;
+  storagePermission?: NativeStoragePermissionState;
+  onRequestStoragePermission?: () => Promise<void>;
+  onTriggerAutoScan?: () => Promise<{ scannedFilesCount: number; matchedCount: number }>;
   scanProgress?: {
     active: boolean;
     scanned: number;
     total: number;
     matched: number;
   } | null;
-  pendingReinstallCount?: number;
 }
 
 const TOUR_SEEN_KEY = 'noor_elahi_subject_tour_seen_v1';
@@ -110,9 +114,11 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
   onPlayVideo,
   onOpenPdf,
   onOfflineAlert,
-  onScanDeviceFiles,
+  isNativeCapacitor = false,
+  storagePermission = 'web',
+  onRequestStoragePermission,
+  onTriggerAutoScan,
   scanProgress,
-  pendingReinstallCount = 0,
 }) => {
   const [localSubjectId, setLocalSubjectId] = useState<string | null>(null);
   const selectedSubjectId =
@@ -130,40 +136,26 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
   const [tourIndex, setTourIndex] = useState(0);
   const [scanningFiles, setScanningFiles] = useState(false);
   const [scanMessage, setScanMessage] = useState<string | null>(null);
-  const filePickerRef = useRef<HTMLInputElement | null>(null);
 
   useBackOverlay(tourOpen, () => setTourOpen(false), 'subject-tour');
 
-  const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const picked = Array.from(e.target.files || []);
-    e.target.value = '';
-    if (picked.length === 0 || !onScanDeviceFiles) return;
+  const handleAutoScanClick = async () => {
+    if (!onTriggerAutoScan || scanningFiles) return;
     setScanningFiles(true);
     setScanMessage(null);
     try {
-      const { restoredCount } = await onScanDeviceFiles(picked);
-      if (restoredCount > 0) {
-        setScanMessage(`${restoredCount}টি ক্লাসের ডাউনলোড করা ফাইল যুক্ত হয়েছে।`);
+      const { matchedCount } = await onTriggerAutoScan();
+      if (matchedCount > 0) {
+        setScanMessage(`Download ফোল্ডার থেকে ${matchedCount}টি ক্লাস অটো-ম্যাচ হয়েছে।`);
       } else {
-        setScanMessage('নির্বাচিত ফাইলগুলোর নামের সাথে কোনো ক্লাস মেলেনি।');
+        setScanMessage('Download ফোল্ডারে নতুন কোনো ম্যাচিং ভিডিও বা PDF পাওয়া যায়নি।');
       }
     } catch {
-      setScanMessage('ফাইল স্ক্যান করতে সমস্যা হয়েছে।');
+      setScanMessage('ফোল্ডার স্ক্যান করতে সমস্যা হয়েছে।');
     } finally {
       setScanningFiles(false);
     }
   };
-
-  const hiddenFileInput = onScanDeviceFiles ? (
-    <input
-      ref={filePickerRef}
-      type="file"
-      multiple
-      accept="video/*,application/pdf,.mp4,.mkv,.webm,.mov,.m4v,.pdf"
-      onChange={handleFilesSelected}
-      className="hidden"
-    />
-  ) : null;
 
   const selectedMeta: SubjectMeta | undefined = useMemo(
     () => SUBJECT_LIST.find((s) => s.id === selectedSubjectId),
@@ -192,7 +184,6 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
   if (!selectedSubjectId || !selectedMeta) {
     return (
       <div className="space-y-4">
-        {hiddenFileInput}
         <div className="flex items-center justify-between gap-2 px-1">
           <div className="flex items-center gap-2 min-w-0">
             <h2 className="text-lg sm:text-xl font-bold text-white truncate">বিষয়সমূহ</h2>
@@ -200,29 +191,49 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
               ৭টি বিষয়
             </span>
           </div>
-          {onScanDeviceFiles && (
+          {isNativeCapacitor && onTriggerAutoScan && (
             <button
               type="button"
               disabled={scanningFiles}
-              onClick={() => filePickerRef.current?.click()}
+              onClick={handleAutoScanClick}
               className="px-3 py-1.5 rounded-xl bg-slate-900 border border-emerald-500/35 hover:border-emerald-400 text-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition shrink-0 disabled:opacity-60"
             >
               {scanningFiles ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
-                <FolderSearch className="w-3.5 h-3.5" />
+                <RefreshCw className="w-3.5 h-3.5" />
               )}
-              <span>অফলাইন ফাইল স্ক্যান</span>
+              <span>অটো স্ক্যান</span>
             </button>
           )}
         </div>
+
+        {isNativeCapacitor && storagePermission === 'denied' && (
+          <div className="rounded-2xl bg-slate-900/95 border border-amber-500/45 px-3.5 py-3 flex items-center justify-between gap-3 text-xs text-amber-200">
+            <div className="flex items-center gap-2 min-w-0">
+              <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="min-w-0 leading-relaxed">
+                Download ফোল্ডার অটো স্ক্যান করতে স্টোরেজ পারমিশন প্রয়োজন — পারমিশন দাও
+              </span>
+            </div>
+            {onRequestStoragePermission && (
+              <button
+                type="button"
+                onClick={() => void onRequestStoragePermission()}
+                className="shrink-0 px-3 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
+              >
+                পারমিশন দাও
+              </button>
+            )}
+          </div>
+        )}
 
         {scanProgress?.active && (
           <div className="rounded-2xl bg-slate-900/90 border border-cyan-500/30 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-cyan-300">
             <div className="flex items-center gap-2 min-w-0">
               <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
               <span className="truncate">
-                ধীরে ধীরে ফাইল স্ক্যান হচ্ছে ({scanProgress.scanned}/{scanProgress.total})...
+                Download ফোল্ডার অটো স্ক্যান হচ্ছে ({scanProgress.scanned}/{scanProgress.total})...
               </span>
             </div>
             {scanProgress.matched > 0 && (
@@ -230,21 +241,6 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                 {scanProgress.matched}টি পাওয়া গেছে
               </span>
             )}
-          </div>
-        )}
-
-        {!scanProgress?.active && pendingReinstallCount > 0 && onScanDeviceFiles && !scanMessage && (
-          <div className="rounded-2xl bg-slate-900/90 border border-amber-500/35 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-amber-200">
-            <span className="min-w-0">
-              আগের ডাউনলোড করা {pendingReinstallCount}টি ক্লাস ফোনে থাকতে পারে — ১ ক্লিকে স্ক্যান করুন।
-            </span>
-            <button
-              type="button"
-              onClick={() => filePickerRef.current?.click()}
-              className="shrink-0 px-2.5 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-[11px]"
-            >
-              স্ক্যান করুন
-            </button>
           </div>
         )}
 
@@ -348,7 +344,6 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
 
   return (
     <div className="space-y-5">
-      {hiddenFileInput}
       {/* Subject Header */}
       <div className="flex items-center gap-3">
         <button
@@ -366,20 +361,20 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
           <h2 className="text-xl font-bold text-white truncate">{selectedMeta.name}</h2>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {onScanDeviceFiles && (
+          {isNativeCapacitor && onTriggerAutoScan && (
             <button
               type="button"
               disabled={scanningFiles}
-              onClick={() => filePickerRef.current?.click()}
+              onClick={handleAutoScanClick}
               className="px-2.5 py-2 rounded-xl bg-slate-900 border border-emerald-500/35 hover:border-emerald-400 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition disabled:opacity-60"
-              title="ড্রাইভ থেকে ডাউনলোড করা ভিডিও বা PDF সিলেক্ট করুন"
+              title="Download ফোল্ডার অটো স্ক্যান করুন"
             >
               {scanningFiles ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
-                <FolderSearch className="w-3.5 h-3.5" />
+                <RefreshCw className="w-3.5 h-3.5" />
               )}
-              <span className="text-[11px] sm:text-xs">স্ক্যান</span>
+              <span className="text-[11px] sm:text-xs">অটো স্ক্যান</span>
             </button>
           )}
           {(selectedDoc?.description || sectionsWithTitles.length > 0) && (
@@ -398,12 +393,32 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
         </div>
       </div>
 
+      {isNativeCapacitor && storagePermission === 'denied' && (
+        <div className="rounded-2xl bg-slate-900/95 border border-amber-500/45 px-3.5 py-3 flex items-center justify-between gap-3 text-xs text-amber-200">
+          <div className="flex items-center gap-2 min-w-0">
+            <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+            <span className="min-w-0 leading-relaxed">
+              অটো স্ক্যান চালু করতে স্টোরেজ পারমিশন দিন — পারমিশন দাও
+            </span>
+          </div>
+          {onRequestStoragePermission && (
+            <button
+              type="button"
+              onClick={() => void onRequestStoragePermission()}
+              className="shrink-0 px-3 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
+            >
+              পারমিশন দাও
+            </button>
+          )}
+        </div>
+      )}
+
       {scanProgress?.active && (
         <div className="rounded-2xl bg-slate-900/90 border border-cyan-500/30 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-cyan-300">
           <div className="flex items-center gap-2 min-w-0">
             <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
             <span className="truncate">
-              ধীরে ধীরে ফাইল স্ক্যান হচ্ছে ({scanProgress.scanned}/{scanProgress.total})...
+              Download ফোল্ডার অটো স্ক্যান হচ্ছে ({scanProgress.scanned}/{scanProgress.total})...
             </span>
           </div>
           {scanProgress.matched > 0 && (
@@ -596,8 +611,12 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                       const hasPdf = Boolean(item.pdfUrl?.trim());
 
                       const rec = downloads[item.id];
-                      const hasDownloadedVideo = Boolean(rec && rec.hasLocalVideo);
-                      const hasDownloadedPdf = Boolean(rec && rec.hasLocalPdf);
+                      const hasDownloadedVideo = Boolean(
+                        rec && (rec.hasLocalVideo || rec.localVideoUri)
+                      );
+                      const hasDownloadedPdf = Boolean(
+                        rec && (rec.hasLocalPdf || rec.localPdfUri)
+                      );
 
                       const displayName = item.name?.trim() || `ক্লাস ${currentClassNum}`;
 
@@ -754,6 +773,17 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                               </div>
                             )}
                           </div>
+
+                          {(hasDownloadedVideo || hasDownloadedPdf) && (
+                            <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-3 py-1.5 text-[11px] font-semibold text-emerald-300 flex items-center justify-between gap-2">
+                              <span>✅ ডাউনলোড করা আছে - অ্যাপ থেকে দেখো</span>
+                              {rec?.matchScore ? (
+                                <span className="font-mono-num text-[10px] text-emerald-400/90 shrink-0">
+                                  {rec.matchScore}% ম্যাচ
+                                </span>
+                              ) : null}
+                            </div>
+                          )}
                         </div>
                       );
                     })}

@@ -25,7 +25,7 @@ import {
   Bell,
   BookOpen,
   CheckCircle2,
-  FolderSearch,
+  ShieldAlert,
   User as UserIcon,
   WifiOff,
   X,
@@ -55,10 +55,13 @@ import {
   reconcileOfflineDownloadsWithCatalog,
   removeAppStateBackup,
   saveAppStateBackup,
-  saveOfflineBlobForClass,
-  scanAndRestoreFilesFromDevice,
-  tryAutoRescanGrantedDirectory,
 } from './lib/offlineStorage';
+import {
+  autoScanDownloadsWithCapacitor,
+  isCapacitorNative,
+  NativeStoragePermissionState,
+  requestNativeStoragePermission,
+} from './lib/capacitorScanner';
 import {
   formatNotificationRemainingLabel,
   loadSeenNotificationIds,
@@ -69,7 +72,7 @@ import {
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthSuitcaseScreen } from './components/AuthSuitcaseScreen';
-import { OfflineTargetPayload, SubjectsView } from './components/SubjectsView';
+import { SubjectsView } from './components/SubjectsView';
 import { ProfileView } from './components/ProfileView';
 import { PlyrVideoPlayer } from './components/PlyrVideoPlayer';
 import { PdfViewerModal } from './components/PdfViewerModal';
@@ -249,15 +252,16 @@ function AppContent() {
   // Notifications seen tracking & banner
   const [seenNotifIds, setSeenNotifIds] = useState<Set<string>>(() => loadSeenNotificationIds());
   const [topBanner, setTopBanner] = useState<string | null>(null);
-  const [pendingOfflineTarget, setPendingOfflineTarget] = useState<OfflineTargetPayload | null>(null);
-  const offlineFileInputRef = useRef<HTMLInputElement | null>(null);
+  const isNativeCapacitor = useMemo(() => isCapacitorNative(), []);
+  const [storagePermission, setStoragePermission] = useState<NativeStoragePermissionState>(() =>
+    isCapacitorNative() ? 'granted' : 'web'
+  );
   const [scanProgress, setScanProgress] = useState<{
     active: boolean;
     scanned: number;
     total: number;
     matched: number;
   } | null>(null);
-  const [cloudDownloadIds, setCloudDownloadIds] = useState<Set<string>>(new Set());
 
   const unreadNotifCount = useMemo(
     () => notifications.filter((n) => !seenNotifIds.has(n.id)).length,
@@ -464,83 +468,7 @@ function AppContent() {
     };
   }, []);
 
-  // Auto-rescan previously granted device download directory when returning from external Drive/browser
-  // Progressive offline sync: verify IndexedDB media against catalog & rescan granted device folder on mount/visibility/offline
-  useEffect(() => {
-    if (!appUser) return;
-    let cancelled = false;
-
-    const runProgressiveSync = async (includeDirRescan: boolean) => {
-      try {
-        const reconciled = await reconcileOfflineDownloadsWithCatalog(subjects, appUser.uid);
-        if (!cancelled && Object.keys(reconciled).length > 0) {
-          setDownloadsMap((prev) => {
-            const next = { ...prev };
-            for (const [id, rec] of Object.entries(reconciled)) {
-              next[id] = rec;
-            }
-            writeLocalCache(CACHE_DOWNLOADS_KEY, next);
-            return next;
-          });
-        }
-      } catch {
-        // Ignore IDB sync failure
-      }
-
-      if (!includeDirRescan || Object.keys(subjects).length === 0) return;
-
-      try {
-        const matched = await tryAutoRescanGrantedDirectory(
-          subjects,
-          appUser.uid,
-          (scanned, total, matchedCount) => {
-            if (!cancelled) {
-              setScanProgress({ active: true, scanned, total, matched: matchedCount });
-            }
-          }
-        );
-        if (!cancelled) {
-          setScanProgress(null);
-          if (matched.length > 0) {
-            setDownloadsMap((prev) => {
-              const next = { ...prev };
-              for (const r of matched) {
-                next[r.itemId] = r;
-              }
-              writeLocalCache(CACHE_DOWNLOADS_KEY, next);
-              return next;
-            });
-          }
-        }
-      } catch {
-        if (!cancelled) setScanProgress(null);
-      }
-    };
-
-    const timer = window.setTimeout(() => {
-      void runProgressiveSync(true);
-    }, 350);
-
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        void runProgressiveSync(true);
-      }
-    };
-    const onOfflineEvent = () => {
-      void runProgressiveSync(true);
-    };
-
-    document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('offline', onOfflineEvent);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-      document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('offline', onOfflineEvent);
-    };
-  }, [appUser, subjects]);
-
-  // Hydrate offline IndexedDB downloads on mount (even before subjects load)
+  // Hydrate offline IndexedDB downloads on mount while preserving any Capacitor native file URIs
   useEffect(() => {
     listOfflineMedia()
       .then((entries) => {
@@ -551,17 +479,22 @@ function AppContent() {
             if (!entryMap.has(id)) {
               next[id] = {
                 ...existing,
-                hasLocalVideo: false,
-                hasLocalPdf: false,
+                hasLocalVideo: Boolean(existing.localVideoUri),
+                hasLocalPdf: Boolean(existing.localPdfUri),
               };
             }
           }
           for (const entry of entries) {
-            const hasVideo = Boolean(entry.videoBlob && entry.videoBlob.size > 0);
-            const hasPdf = Boolean(entry.pdfBlob && entry.pdfBlob.size > 0);
+            const existing = prev[entry.itemId];
+            const hasVideo = Boolean(
+              (entry.videoBlob && entry.videoBlob.size > 0) || existing?.localVideoUri
+            );
+            const hasPdf = Boolean(
+              (entry.pdfBlob && entry.pdfBlob.size > 0) || existing?.localPdfUri
+            );
             if (!hasVideo && !hasPdf) continue;
             next[entry.itemId] = {
-              uid: appUser?.uid || prev[entry.itemId]?.uid || '',
+              uid: appUser?.uid || existing?.uid || '',
               itemId: entry.itemId,
               subjectId: entry.subjectId,
               sectionId: entry.sectionId,
@@ -570,9 +503,13 @@ function AppContent() {
               videoName: entry.videoName,
               videoUrl: entry.videoUrl,
               pdfUrl: entry.pdfUrl,
-              fileSizeBytes: entry.fileSizeBytes,
+              fileSizeBytes: entry.fileSizeBytes || existing?.fileSizeBytes || 0,
               hasLocalVideo: hasVideo,
               hasLocalPdf: hasPdf,
+              localVideoUri: existing?.localVideoUri,
+              localPdfUri: existing?.localPdfUri,
+              matchedFileName: existing?.matchedFileName,
+              matchScore: existing?.matchScore,
             };
           }
           writeLocalCache(CACHE_DOWNLOADS_KEY, next);
@@ -985,23 +922,25 @@ function AppContent() {
       )
     );
 
-    // 4. Downloads Registry (preserves local IndexedDB flags & detects previously downloaded items after reinstall)
+    // 4. Downloads Registry (preserves local IndexedDB & native Capacitor file URI fields)
     const dlPath = `users/${firebaseUser.uid}/downloads`;
     unsubs.push(
       onSnapshot(
         query(collection(db, dlPath), where('uid', '==', firebaseUser.uid)),
         (snap) => {
-          const nextCloudIds = new Set<string>();
-          snap.forEach((d) => nextCloudIds.add(d.id));
-          setCloudDownloadIds(nextCloudIds);
           setDownloadsMap((prev) => {
             const next = { ...prev };
             snap.forEach((d) => {
               const rec = d.data() as DownloadRecord;
+              const existing = prev[d.id];
               next[d.id] = {
                 ...rec,
-                hasLocalVideo: Boolean(prev[d.id]?.hasLocalVideo),
-                hasLocalPdf: Boolean(prev[d.id]?.hasLocalPdf),
+                hasLocalVideo: Boolean(existing?.hasLocalVideo || existing?.localVideoUri),
+                hasLocalPdf: Boolean(existing?.hasLocalPdf || existing?.localPdfUri),
+                localVideoUri: existing?.localVideoUri,
+                localPdfUri: existing?.localPdfUri,
+                matchedFileName: existing?.matchedFileName,
+                matchScore: existing?.matchScore,
               };
             });
             writeLocalCache(CACHE_DOWNLOADS_KEY, next);
@@ -1470,7 +1409,17 @@ function AppContent() {
     setDownloadsMap((prev) => {
       const next = { ...prev };
       for (const r of records) {
-        next[r.itemId] = r;
+        const existing = prev[r.itemId];
+        next[r.itemId] = {
+          ...existing,
+          ...r,
+          hasLocalVideo: Boolean(r.hasLocalVideo || r.localVideoUri || existing?.hasLocalVideo),
+          hasLocalPdf: Boolean(r.hasLocalPdf || r.localPdfUri || existing?.hasLocalPdf),
+          localVideoUri: r.localVideoUri || existing?.localVideoUri,
+          localPdfUri: r.localPdfUri || existing?.localPdfUri,
+          matchedFileName: r.matchedFileName || existing?.matchedFileName,
+          matchScore: r.matchScore ?? existing?.matchScore,
+        };
       }
       writeLocalCache(CACHE_DOWNLOADS_KEY, next);
       return next;
@@ -1512,104 +1461,137 @@ function AppContent() {
     }
   }, [appUser, firebaseUser]);
 
-  const pendingReinstallCount = useMemo(() => {
-    if (cloudDownloadIds.size === 0) return 0;
-    let missingLocally = 0;
-    for (const id of cloudDownloadIds) {
-      const rec = downloadsMap[id];
-      if (!rec || (!rec.hasLocalVideo && !rec.hasLocalPdf)) {
-        missingLocally += 1;
-      }
-    }
-    return missingLocally;
-  }, [cloudDownloadIds, downloadsMap]);
+  const runCapacitorAutoScan = useCallback(
+    async (promptPermission: boolean): Promise<{ scannedFilesCount: number; matchedCount: number }> => {
+      if (!appUser) return { scannedFilesCount: 0, matchedCount: 0 };
 
-  const handleScanDeviceFiles = useCallback(async (files: File[]) => {
-    const uid = appUser?.uid || '';
-    setScanProgress({ active: true, scanned: 0, total: Math.max(1, files.length), matched: 0 });
-    try {
-      const { restoredCount, matchedRecords } = await scanAndRestoreFilesFromDevice(
-        files,
-        subjects,
-        uid,
-        (scanned, total, matched) => {
-          setScanProgress({ active: true, scanned, total, matched });
+      try {
+        const reconciled = await reconcileOfflineDownloadsWithCatalog(subjects, appUser.uid);
+        if (Object.keys(reconciled).length > 0) {
+          setDownloadsMap((prev) => {
+            const next = { ...prev };
+            for (const [id, rec] of Object.entries(reconciled)) {
+              const existing = prev[id];
+              next[id] = {
+                ...rec,
+                localVideoUri: existing?.localVideoUri,
+                localPdfUri: existing?.localPdfUri,
+                matchedFileName: existing?.matchedFileName,
+                matchScore: existing?.matchScore,
+                hasLocalVideo: Boolean(rec.hasLocalVideo || existing?.localVideoUri),
+                hasLocalPdf: Boolean(rec.hasLocalPdf || existing?.localPdfUri),
+              };
+            }
+            writeLocalCache(CACHE_DOWNLOADS_KEY, next);
+            return next;
+          });
         }
-      );
-      if (matchedRecords.length > 0) {
-        await handleRestoreMatchedRecords(matchedRecords);
-        showBanner(`${restoredCount}টি ক্লাসের অফলাইন ফাইল যুক্ত হয়েছে।`);
+      } catch {
+        // Ignore IDB reconcile error
       }
-      return { restoredCount };
-    } finally {
-      setScanProgress(null);
-    }
-  }, [appUser?.uid, subjects, handleRestoreMatchedRecords, showBanner]);
 
-  const handlePickSingleOfflineFile = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      e.target.value = '';
-      const target = pendingOfflineTarget;
-      if (!file || !target) return;
+      if (!isNativeCapacitor) {
+        setStoragePermission('web');
+        return { scannedFilesCount: 0, matchedCount: 0 };
+      }
 
-      const isPdfTarget = target.type === 'pdf';
-      const entry = await saveOfflineBlobForClass({
-        itemId: target.item.id,
-        subjectId: target.subjectId,
-        sectionId: target.sectionId,
-        sectionTitle: target.sectionTitle,
-        classNumber: target.classNumber,
-        videoName: target.item.name,
-        videoUrl: target.item.videoUrl || '',
-        pdfUrl: target.item.pdfUrl || '',
-        videoBlob: isPdfTarget ? undefined : file,
-        pdfBlob: isPdfTarget ? file : undefined,
-      });
+      if (Object.keys(subjects).length === 0) {
+        return { scannedFilesCount: 0, matchedCount: 0 };
+      }
 
-      const rec: DownloadRecord = {
-        uid: appUser?.uid || '',
-        itemId: target.item.id,
-        subjectId: target.subjectId,
-        sectionId: target.sectionId,
-        sectionTitle: target.sectionTitle,
-        classNumber: target.classNumber,
-        videoName: target.item.name,
-        videoUrl: target.item.videoUrl || '',
-        pdfUrl: target.item.pdfUrl || '',
-        fileSizeBytes: entry.fileSizeBytes,
-        hasLocalVideo: !!entry.videoBlob,
-        hasLocalPdf: !!entry.pdfBlob,
-      };
-      await handleRestoreMatchedRecords([rec]);
-      setPendingOfflineTarget(null);
-
-      if (isPdfTarget) {
-        goBackOr((p) => ({
-          ...p,
-          offlineModalOpen: false,
-          activePdf: {
-            itemId: target.item.id,
-            title: target.item.name,
-            pdfUrl: target.item.pdfUrl,
+      setScanProgress({ active: true, scanned: 0, total: 1, matched: 0 });
+      try {
+        const res = await autoScanDownloadsWithCapacitor(subjects, appUser.uid, {
+          promptPermission,
+          onProgress: (scanned, total, matched) => {
+            setScanProgress({ active: true, scanned, total: Math.max(1, total), matched });
           },
-        }));
-      } else {
-        goBackOr((p) => ({
-          ...p,
-          offlineModalOpen: false,
-          activeVideo: {
-            item: target.item,
-            subjectId: target.subjectId,
-            sectionId: target.sectionId,
-            sectionTitle: target.sectionTitle,
-            classNumber: target.classNumber,
-          },
-        }));
+        });
+
+        if (res.status === 'permission_denied') {
+          setStoragePermission('denied');
+          return { scannedFilesCount: 0, matchedCount: 0 };
+        }
+
+        if (res.status === 'granted') {
+          setStoragePermission('granted');
+          const matchedIds = new Set(res.matchedRecords.map((r) => r.itemId));
+
+          // Remove stale native-only markers if file was deleted from phone Download folder, keep IndexedDB blobs
+          setDownloadsMap((prev) => {
+            const next = { ...prev };
+            for (const [id, existing] of Object.entries(next)) {
+              if (existing.localVideoUri && !matchedIds.has(id)) {
+                const updated = { ...existing };
+                delete updated.localVideoUri;
+                delete updated.localPdfUri;
+                delete updated.matchedFileName;
+                delete updated.matchScore;
+                next[id] = updated;
+              }
+            }
+            writeLocalCache(CACHE_DOWNLOADS_KEY, next);
+            return next;
+          });
+
+          if (res.matchedRecords.length > 0) {
+            await handleRestoreMatchedRecords(res.matchedRecords);
+          }
+
+          return {
+            scannedFilesCount: res.scannedFilesCount,
+            matchedCount: res.matchedRecords.length,
+          };
+        }
+
+        return { scannedFilesCount: 0, matchedCount: 0 };
+      } catch {
+        return { scannedFilesCount: 0, matchedCount: 0 };
+      } finally {
+        setScanProgress(null);
       }
     },
-    [pendingOfflineTarget, appUser?.uid, handleRestoreMatchedRecords, goBackOr]
+    [appUser, subjects, isNativeCapacitor, handleRestoreMatchedRecords]
   );
+
+  const handleRequestNativePermission = useCallback(async () => {
+    const state = await requestNativeStoragePermission();
+    setStoragePermission(state);
+    if (state === 'granted') {
+      const { matchedCount } = await runCapacitorAutoScan(false);
+      if (matchedCount > 0) {
+        showBanner(`Download ফোল্ডার থেকে ${matchedCount}টি ক্লাস পাওয়া গেছে!`);
+      }
+    }
+  }, [runCapacitorAutoScan, showBanner]);
+
+  // Automatically trigger Capacitor Download folder scan when online, on launch, and when returning from Drive
+  useEffect(() => {
+    if (!appUser) return;
+    let cancelled = false;
+
+    const triggerIfActive = (promptIfNeeded: boolean) => {
+      if (cancelled) return;
+      void runCapacitorAutoScan(promptIfNeeded);
+    };
+
+    const timer = window.setTimeout(() => {
+      triggerIfActive(isOnline);
+    }, 400);
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible' && navigator.onLine) {
+        triggerIfActive(false);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [appUser, isOnline, subjects, runCapacitorAutoScan]);
 
   const handleSendIssueReport = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1783,13 +1765,14 @@ function AppContent() {
                       },
                     }))
                   }
-                  onOfflineAlert={(target) => {
-                    setPendingOfflineTarget(target || null);
+                  onOfflineAlert={() => {
                     pushNav((p) => ({ ...p, offlineModalOpen: true }));
                   }}
-                  onScanDeviceFiles={handleScanDeviceFiles}
+                  isNativeCapacitor={isNativeCapacitor}
+                  storagePermission={storagePermission}
+                  onRequestStoragePermission={handleRequestNativePermission}
+                  onTriggerAutoScan={() => runCapacitorAutoScan(true)}
                   scanProgress={scanProgress}
-                  pendingReinstallCount={pendingReinstallCount}
                 />
               )}
 
@@ -1854,7 +1837,11 @@ function AppContent() {
               durationLabel={activeVideo.item.duration}
               initialPosition={progressMap[activeVideo.item.id]?.currentTime || 0}
               isOnline={isOnline}
-              hasOfflineVideo={Boolean(downloadsMap[activeVideo.item.id]?.hasLocalVideo)}
+              hasOfflineVideo={Boolean(
+                downloadsMap[activeVideo.item.id]?.hasLocalVideo ||
+                downloadsMap[activeVideo.item.id]?.localVideoUri
+              )}
+              localVideoUri={downloadsMap[activeVideo.item.id]?.localVideoUri}
               onSaveProgress={handleSaveProgress}
               onOfflineCached={(info) => {
                 const rec: DownloadRecord = {
@@ -1874,15 +1861,11 @@ function AppContent() {
                 void handleRestoreMatchedRecords([rec]);
               }}
               onOpenPdf={() => {
-                if (!isOnline && !downloadsMap[activeVideo.item.id]?.hasLocalPdf) {
-                  setPendingOfflineTarget({
-                    type: 'pdf',
-                    item: activeVideo.item,
-                    subjectId: activeVideo.subjectId,
-                    sectionId: activeVideo.sectionId,
-                    sectionTitle: activeVideo.sectionTitle,
-                    classNumber: activeVideo.classNumber,
-                  });
+                const hasPdfOffline = Boolean(
+                  downloadsMap[activeVideo.item.id]?.hasLocalPdf ||
+                  downloadsMap[activeVideo.item.id]?.localPdfUri
+                );
+                if (!isOnline && !hasPdfOffline) {
                   pushNav((p) => ({ ...p, offlineModalOpen: true }));
                   return;
                 }
@@ -1907,6 +1890,7 @@ function AppContent() {
               title={activePdf.title}
               itemId={activePdf.itemId}
               pdfUrl={activePdf.pdfUrl}
+              localPdfUri={downloadsMap[activePdf.itemId]?.localPdfUri}
               onOfflineCached={(info) => {
                 const existing = downloadsMap[info.itemId];
                 const rec: DownloadRecord = {
@@ -2015,40 +1999,28 @@ function AppContent() {
           {offlineModalOpen && (
             <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
               <div className="w-full max-w-xs rounded-3xl bg-slate-900 border border-amber-500/40 p-6 text-center space-y-4 shadow-2xl">
-                <input
-                  ref={offlineFileInputRef}
-                  type="file"
-                  accept={
-                    pendingOfflineTarget?.type === 'pdf'
-                      ? 'application/pdf,.pdf'
-                      : 'video/*,.mp4,.mkv,.webm,.mov,.m4v'
-                  }
-                  onChange={handlePickSingleOfflineFile}
-                  className="hidden"
-                />
                 <div className="w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center mx-auto">
                   <WifiOff className="w-6 h-6 text-amber-400" />
                 </div>
                 <h3 className="text-base font-bold text-white">আপনি এখন অফলাইনে আছেন</h3>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  {pendingOfflineTarget
-                    ? `এই ${pendingOfflineTarget.type === 'pdf' ? 'PDF' : 'ভিডিও'} টি অ্যাপে সংরক্ষিত নেই। আপনার ফোনে ডাউনলোড করা থাকলে নিচের বাটনে ট্যাপ করে ফাইলটি সিলেক্ট করুন।`
-                    : 'এই ভিডিও বা PDF টি সংরক্ষিত নেই। অফলাইনে দেখতে চাইলে ইন্টারনেট সংযোগ চালু করে ওপেন বা ডাউনলোড করুন।'}
+                  {isNativeCapacitor
+                    ? 'এই ফাইলটি এখনো Download ফোল্ডারে স্ক্যান করা অবস্থায় পাওয়া যায়নি। অনলাইনে এসে Drive থেকে ডাউনলোড করলে অ্যাপ অটোমেটিক স্ক্যান করে নেবে।'
+                    : 'এই ভিডিও বা PDF টি অফলাইন ক্যাশে সংরক্ষিত নেই। ইন্টারনেট চালু করে Drive থেকে দেখুন বা অ্যাপের ভেতর সেভ করুন।'}
                 </p>
-                {pendingOfflineTarget && (
+                {isNativeCapacitor && storagePermission === 'denied' && (
                   <button
                     type="button"
-                    onClick={() => offlineFileInputRef.current?.click()}
-                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5"
+                    onClick={() => void handleRequestNativePermission()}
+                    className="w-full py-2.5 px-3 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5"
                   >
-                    <FolderSearch className="w-4 h-4 shrink-0" />
-                    <span>ফোন থেকে ফাইল সিলেক্ট করে খুলুন</span>
+                    <ShieldAlert className="w-4 h-4 shrink-0" />
+                    <span>পারমিশন দাও</span>
                   </button>
                 )}
                 <button
                   type="button"
                   onClick={() => {
-                    setPendingOfflineTarget(null);
                     goBackOr((p) => ({ ...p, offlineModalOpen: false }));
                   }}
                   className="w-full py-2.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold text-sm"
