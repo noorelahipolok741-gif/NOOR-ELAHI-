@@ -11,6 +11,15 @@ const config: CapacitorConfig = {
     Filesystem: {
       // Uses Android runtime permissions configured in AndroidManifest.xml
     },
+    SocialLogin: {
+      providers: {
+        google: true,
+        facebook: false,
+        apple: false,
+        twitter: false,
+      },
+      logLevel: 1,
+    },
   },
 };
 

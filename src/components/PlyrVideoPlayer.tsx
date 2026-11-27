@@ -29,11 +29,15 @@ import {
   safeOpenExternalUrl,
   sanitizeBaseFilename,
   saveOfflineBlobForClass,
+  saveToInternalDirectoryIfPermitted,
 } from '../lib/offlineStorage';
 import {
+  downloadRemoteFileToCapacitorPublicStorage,
   isNativeConvertedOrFileUrl,
   toPlayableNativeSrc,
 } from '../lib/capacitorScanner';
+import { isNoorNativeStorageAvailable } from '../lib/noorStoragePlugin';
+import { apiUrl } from '../lib/api';
 
 interface PlyrVideoPlayerProps {
   itemId: string;
@@ -56,6 +60,8 @@ interface PlyrVideoPlayerProps {
     fileSizeBytes: number;
     hasLocalVideo: boolean;
     hasLocalPdf: boolean;
+    localVideoUri?: string;
+    matchedFileName?: string;
   }) => void;
   onClose: () => void;
 }
@@ -382,7 +388,7 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
               hls.startLoad();
             } else if (fatalRetries <= 1 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls.recoverMediaError();
-            } else if (allowProxyFallback && !hlsTargetUrl.startsWith('/api/proxy-hls')) {
+            } else if (allowProxyFallback && !hlsTargetUrl.includes('/api/proxy-hls')) {
               startHlsPlayback(resolveHlsProxyUrl(hlsTargetUrl), false);
             } else {
               fallbackHandlerRef.current?.();
@@ -420,7 +426,9 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
 
         try {
           const res = await fetch(
-            `/api/resolve-media?u=${encodeURIComponent(encodeProxyParam(normalizeMediaUrl(videoUrl)))}&kind=video`
+            apiUrl(
+              `/api/resolve-media?u=${encodeURIComponent(encodeProxyParam(normalizeMediaUrl(videoUrl)))}&kind=video`
+            )
           );
           const data = (await res.json()) as {
             type?: 'direct' | 'hls' | 'embed' | 'error';
@@ -442,14 +450,15 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
           }
 
           if (data.type === 'hls' && (data.proxiedHlsUrl || data.hlsUrl)) {
-            startHlsPlayback(data.proxiedHlsUrl || data.hlsUrl!, false);
+            const hlsSrc = data.proxiedHlsUrl ? apiUrl(data.proxiedHlsUrl) : data.hlsUrl!;
+            startHlsPlayback(hlsSrc, false);
             return;
           }
 
-          if (data.type === 'direct' && data.streamUrl && data.streamUrl !== sourceUrl) {
+          if (data.type === 'direct' && data.streamUrl && apiUrl(data.streamUrl) !== sourceUrl) {
             cleanupActivePlayer();
             setupPlyrInstance();
-            videoEl.src = data.streamUrl;
+            videoEl.src = apiUrl(data.streamUrl);
             videoEl.load();
             return;
           }
@@ -591,6 +600,32 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
       const proxyUrl = resolveDownloadProxyUrl(videoUrl, filename, 'video');
       if (!proxyUrl) throw new Error('অফলাইন সেভের জন্য সরাসরি ভিডিও লিংক পাওয়া যায়নি।');
 
+      if (isNoorNativeStorageAvailable()) {
+        const nativeDl = await downloadRemoteFileToCapacitorPublicStorage(
+          proxyUrl,
+          filename,
+          'video/mp4',
+          (ev) => {
+            if (typeof ev.progress === 'number' && ev.progress >= 0) {
+              setSavePct(Math.min(100, ev.progress));
+            }
+          }
+        );
+        if (nativeDl.saved && nativeDl.uri) {
+          setOfflineSaved(true);
+          setSaveNotice(`ফোনের ${nativeDl.folder || 'Download/NoorElahi'} ফোল্ডারে সংরক্ষিত হয়েছে!`);
+          onOfflineCached?.({
+            itemId,
+            fileSizeBytes: Number(nativeDl.sizeBytes || 0),
+            hasLocalVideo: true,
+            hasLocalPdf: false,
+            localVideoUri: nativeDl.uri,
+            matchedFileName: filename,
+          });
+          return;
+        }
+      }
+
       const res = await fetch(proxyUrl);
       const ct = (res.headers.get('content-type') || '').toLowerCase();
       if (!res.ok || ct.includes('text/html') || ct.includes('application/json')) {
@@ -635,13 +670,25 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
         videoBlob: blob,
       });
 
+      const deviceSave = await saveToInternalDirectoryIfPermitted(
+        videoName || 'video',
+        blob,
+        undefined
+      );
+
       setOfflineSaved(true);
-      setSaveNotice('অফলাইনে সংরক্ষিত হয়েছে!');
+      setSaveNotice(
+        deviceSave.folder
+          ? `অফলাইনে ও ফোনের ${deviceSave.folder} ফোল্ডারে সংরক্ষিত হয়েছে!`
+          : 'অফলাইনে সংরক্ষিত হয়েছে!'
+      );
       onOfflineCached?.({
         itemId,
         fileSizeBytes: entry.fileSizeBytes,
         hasLocalVideo: true,
         hasLocalPdf: Boolean(entry.pdfBlob && entry.pdfBlob.size > 0),
+        localVideoUri: deviceSave.localVideoUri,
+        matchedFileName: filename,
       });
     } catch (err) {
       setSaveNotice(

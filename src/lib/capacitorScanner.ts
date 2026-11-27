@@ -2,6 +2,19 @@ import { Capacitor } from '@capacitor/core';
 import { Directory, FileInfo, Filesystem } from '@capacitor/filesystem';
 import { ClassItem, DownloadRecord, SubjectDoc } from '../types';
 import { getGoogleDriveFileId } from './offlineStorage';
+import {
+  checkNativePermissionsDetailed,
+  downloadUrlToNativePublicStorage,
+  isNoorNativeStorageAvailable,
+  NoorDownloadProgressEvent,
+  NoorPermissionStatus,
+  openNativeAllFilesSettings,
+  pickNativeDownloadFolder,
+  readNativeUriAsBlob,
+  requestNativePermissionsDetailed,
+  saveBase64ToNativePublicStorage,
+  scanNativePublicFiles,
+} from './noorStoragePlugin';
 
 export type NativeStoragePermissionState = 'web' | 'granted' | 'denied';
 
@@ -18,6 +31,7 @@ export interface AutoScanResult {
   status: 'web' | 'granted' | 'permission_denied' | 'error';
   scannedFilesCount: number;
   matchedRecords: DownloadRecord[];
+  permissionDetails?: NoorPermissionStatus;
   errorMessage?: string;
 }
 
@@ -77,7 +91,8 @@ export function isNativeConvertedOrFileUrl(url?: string | null): boolean {
     url.startsWith('file://') ||
     url.startsWith('content://') ||
     url.startsWith('capacitor://') ||
-    url.includes('/_capacitor_file_/')
+    url.includes('/_capacitor_file_/') ||
+    url.includes('/_capacitor_content_/')
   );
 }
 
@@ -220,11 +235,65 @@ function scoreCandidateMatch(
   return bestNameScore;
 }
 
+export async function getDetailedNativePermissionStatus(): Promise<NoorPermissionStatus> {
+  if (!isCapacitorNative()) {
+    return {
+      granted: true,
+      runtimeGranted: true,
+      hasAllFilesAccess: true,
+      hasSavedFolderTree: false,
+      needsFolderGrantForPdf: false,
+    };
+  }
+  if (isNoorNativeStorageAvailable()) {
+    try {
+      return await checkNativePermissionsDetailed();
+    } catch {
+      // Fall through to Capacitor Filesystem check
+    }
+  }
+  try {
+    const status = await Filesystem.checkPermissions();
+    const granted = status.publicStorage === 'granted';
+    return {
+      granted,
+      runtimeGranted: granted,
+      hasAllFilesAccess: granted,
+      hasSavedFolderTree: false,
+      needsFolderGrantForPdf: false,
+    };
+  } catch {
+    return {
+      granted: false,
+      runtimeGranted: false,
+      hasAllFilesAccess: false,
+      hasSavedFolderTree: false,
+      needsFolderGrantForPdf: false,
+    };
+  }
+}
+
 export async function checkNativeStoragePermission(
   promptIfNeeded: boolean
 ): Promise<NativeStoragePermissionState> {
   if (!isCapacitorNative()) {
     return 'web';
+  }
+
+  if (isNoorNativeStorageAvailable()) {
+    try {
+      const current = await checkNativePermissionsDetailed();
+      if (current.granted) {
+        return 'granted';
+      }
+      if (promptIfNeeded) {
+        const requested = await requestNativePermissionsDetailed();
+        return requested.granted ? 'granted' : 'denied';
+      }
+      return 'denied';
+    } catch {
+      // Fallback to Filesystem plugin check
+    }
   }
 
   try {
@@ -248,12 +317,34 @@ export async function requestNativeStoragePermission(): Promise<NativeStoragePer
   if (!isCapacitorNative()) {
     return 'web';
   }
+  if (isNoorNativeStorageAvailable()) {
+    try {
+      const requested = await requestNativePermissionsDetailed();
+      if (requested.granted) return 'granted';
+    } catch {
+      // Fallback to Filesystem plugin
+    }
+  }
   try {
     const requested = await Filesystem.requestPermissions();
     return requested.publicStorage === 'granted' ? 'granted' : 'denied';
   } catch {
     return 'denied';
   }
+}
+
+export async function requestNativeDownloadFolderAccess(): Promise<NoorPermissionStatus> {
+  if (!isNoorNativeStorageAvailable()) {
+    return await getDetailedNativePermissionStatus();
+  }
+  return await pickNativeDownloadFolder();
+}
+
+export async function requestNativeAllFilesAccessSettings(): Promise<NoorPermissionStatus> {
+  if (!isNoorNativeStorageAvailable()) {
+    return await getDetailedNativePermissionStatus();
+  }
+  return await openNativeAllFilesSettings();
 }
 
 async function safeReadDirEntries(
@@ -285,12 +376,63 @@ async function resolveNativeUri(
 async function collectNativeDownloadFiles(): Promise<ScannedNativeFile[]> {
   const collected: ScannedNativeFile[] = [];
   const seenUris = new Set<string>();
+  const seenKeys = new Set<string>();
 
+  const pushNormalizedEntry = (
+    name: string,
+    uri: string,
+    sizeBytes: number,
+    kind: 'video' | 'pdf'
+  ) => {
+    if (!name || !uri || seenUris.has(uri)) return;
+    const compactNorm = normalizeCompactName(name);
+    const spacedNorm = normalizeSpacedName(name);
+    if (!compactNorm) return;
+
+    const dedupKey = `${kind}::${compactNorm}::${sizeBytes}`;
+    if (seenKeys.has(dedupKey)) return;
+
+    seenUris.add(uri);
+    seenKeys.add(dedupKey);
+    collected.push({
+      name,
+      uri,
+      sizeBytes,
+      kind,
+      compactNorm,
+      spacedNorm,
+    });
+  };
+
+  // 1. Native Android NoorStorage scan (MediaStore Videos + Downloads + Files + Persisted SAF Trees + Download dirs)
+  if (isNoorNativeStorageAvailable()) {
+    try {
+      const nativeItems = await scanNativePublicFiles();
+      for (const item of nativeItems) {
+        const lower = (item.name || '').toLowerCase();
+        const kind =
+          item.kind === 'pdf' || PDF_EXT_RE.test(lower)
+            ? 'pdf'
+            : item.kind === 'video' || VIDEO_EXT_RE.test(lower)
+            ? 'video'
+            : null;
+        if (!kind) continue;
+        pushNormalizedEntry(item.name, item.uri, Number(item.sizeBytes || 0), kind);
+      }
+    } catch {
+      // Continue to Capacitor Filesystem fallback below
+    }
+  }
+
+  // 2. Capacitor Filesystem fallback / supplement
   const rootTargets: Array<{ directory: Directory; path: string; scanSubfolders: boolean }> = [
-    { directory: Directory.ExternalStorage, path: 'Download', scanSubfolders: true },
-    { directory: Directory.ExternalStorage, path: 'Downloads', scanSubfolders: false },
+    { directory: Directory.ExternalStorage, path: 'Download/NoorElahi', scanSubfolders: false },
     { directory: Directory.ExternalStorage, path: 'Download/NOOR ELAHI', scanSubfolders: false },
     { directory: Directory.ExternalStorage, path: 'Download/Noor Elahi', scanSubfolders: false },
+    { directory: Directory.ExternalStorage, path: 'Download', scanSubfolders: true },
+    { directory: Directory.ExternalStorage, path: 'Downloads', scanSubfolders: false },
+    { directory: Directory.ExternalStorage, path: 'Documents/NoorElahi', scanSubfolders: false },
+    { directory: Directory.Documents, path: 'NoorElahi', scanSubfolders: false },
     { directory: Directory.Documents, path: '', scanSubfolders: true },
   ];
 
@@ -302,8 +444,7 @@ async function collectNativeDownloadFiles(): Promise<ScannedNativeFile[]> {
     if (!isPdf && !isVideo) return;
 
     const uri = await resolveNativeUri(entry, relPath, directory);
-    if (!uri || seenUris.has(uri)) return;
-    seenUris.add(uri);
+    if (!uri) return;
 
     let sizeBytes = Number(entry.size || 0);
     if (!sizeBytes) {
@@ -315,18 +456,7 @@ async function collectNativeDownloadFiles(): Promise<ScannedNativeFile[]> {
       }
     }
 
-    const compactNorm = normalizeCompactName(name);
-    const spacedNorm = normalizeSpacedName(name);
-    if (!compactNorm) return;
-
-    collected.push({
-      name,
-      uri,
-      sizeBytes,
-      kind: isPdf ? 'pdf' : 'video',
-      compactNorm,
-      spacedNorm,
-    });
+    pushNormalizedEntry(name, uri, sizeBytes, isPdf ? 'pdf' : 'video');
   };
 
   for (const target of rootTargets) {
@@ -374,11 +504,13 @@ export async function autoScanDownloadsWithCapacitor(
   }
 
   const perm = await checkNativeStoragePermission(Boolean(options?.promptPermission));
+  const permissionDetails = await getDetailedNativePermissionStatus();
   if (perm === 'denied') {
     return {
       status: 'permission_denied',
       scannedFilesCount: 0,
       matchedRecords: [],
+      permissionDetails,
     };
   }
 
@@ -432,15 +564,34 @@ export async function autoScanDownloadsWithCapacitor(
         `${subject.name} Class ${classIndex}`,
       ].filter((s) => Boolean(s.trim()));
 
-      const videoDriveId = getGoogleDriveFileId(primaryVideoUrl);
       const pdfDriveId = getGoogleDriveFileId(item.pdfUrl);
 
       let bestVideo: { file: ScannedNativeFile; score: number } | null = null;
-      if (primaryVideoUrl) {
-        for (const vf of videoFiles) {
-          const score = scoreCandidateMatch(candidateNames, videoDriveId, item.expectedSizeMB, vf);
-          if (score >= 0.8 && (!bestVideo || score > bestVideo.score)) {
-            bestVideo = { file: vf, score };
+      const allVideoLinks = (
+        item.videoUrls && item.videoUrls.length > 0
+          ? item.videoUrls
+          : primaryVideoUrl
+          ? [primaryVideoUrl]
+          : []
+      ).filter((u) => Boolean(u?.trim()));
+
+      if (allVideoLinks.length > 0) {
+        for (let vIdx = 0; vIdx < allVideoLinks.length; vIdx += 1) {
+          const vUrl = allVideoLinks[vIdx];
+          const vDriveId = getGoogleDriveFileId(vUrl);
+          const partNames =
+            allVideoLinks.length > 1
+              ? [
+                  ...candidateNames,
+                  `${item.name || ''} Part ${vIdx + 1}`,
+                  `${item.name || ''} (পার্ট ${vIdx + 1})`,
+                ]
+              : candidateNames;
+          for (const vf of videoFiles) {
+            const score = scoreCandidateMatch(partNames, vDriveId, item.expectedSizeMB, vf);
+            if (score >= 0.8 && (!bestVideo || score > bestVideo.score)) {
+              bestVideo = { file: vf, score };
+            }
           }
         }
       }
@@ -489,12 +640,14 @@ export async function autoScanDownloadsWithCapacitor(
       status: 'granted',
       scannedFilesCount: files.length,
       matchedRecords,
+      permissionDetails,
     };
   } catch (err) {
     return {
       status: 'error',
       scannedFilesCount: 0,
       matchedRecords: [],
+      permissionDetails,
       errorMessage: err instanceof Error ? err.message : 'Scan error',
     };
   }
@@ -502,6 +655,8 @@ export async function autoScanDownloadsWithCapacitor(
 
 export async function readNativePdfAsBlob(localPdfUri: string): Promise<Blob | null> {
   if (!localPdfUri) return null;
+
+  // 1. Try direct Capacitor WebView local server bridge (handles file:// & content:// via HTTP)
   try {
     const convertedUrl = toPlayableNativeSrc(localPdfUri);
     if (convertedUrl) {
@@ -514,10 +669,20 @@ export async function readNativePdfAsBlob(localPdfUri: string): Promise<Blob | n
       }
     }
   } catch {
-    // Fallback to Filesystem.readFile below
+    // Fall through to native ContentResolver reader
   }
 
   if (!isCapacitorNative()) return null;
+
+  // 2. Use NoorStoragePlugin.readUriBase64 (reads SAF tree / MediaStore content:// URIs reliably)
+  if (isNoorNativeStorageAvailable()) {
+    const directNativeBlob = await readNativeUriAsBlob(localPdfUri, 'application/pdf');
+    if (directNativeBlob && directNativeBlob.size > 0) {
+      return directNativeBlob;
+    }
+  }
+
+  // 3. Fallback to @capacitor/filesystem readFile
   try {
     const result = await Filesystem.readFile({ path: localPdfUri });
     if (typeof result.data === 'string' && result.data.length > 0) {
@@ -534,4 +699,151 @@ export async function readNativePdfAsBlob(localPdfUri: string): Promise<Blob | n
     // Ignore readFile failure
   }
   return null;
+}
+
+function blobToBase64Raw(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = typeof reader.result === 'string' ? reader.result : '';
+      const commaIdx = res.indexOf(',');
+      resolve(commaIdx >= 0 ? res.slice(commaIdx + 1) : res);
+    };
+    reader.onerror = () => reject(reader.error || new Error('Blob read failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+export async function downloadRemoteFileToCapacitorPublicStorage(
+  remoteUrl: string,
+  filename: string,
+  mimeType: string,
+  onProgress?: (ev: NoorDownloadProgressEvent) => void
+): Promise<{ saved: boolean; uri?: string; folder?: string; sizeBytes?: number }> {
+  if (!isNoorNativeStorageAvailable() || !remoteUrl) {
+    return { saved: false };
+  }
+  const safeFilename = filename.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'noor_elahi_file';
+  try {
+    const res = await downloadUrlToNativePublicStorage(
+      {
+        url: remoteUrl,
+        filename: safeFilename,
+        mimeType,
+        subfolder: 'NoorElahi',
+      },
+      onProgress
+    );
+    return {
+      saved: Boolean(res?.saved),
+      uri: res?.uri,
+      folder: res?.folder || 'Download/NoorElahi',
+      sizeBytes: res?.sizeBytes,
+    };
+  } catch {
+    return { saved: false };
+  }
+}
+
+export async function saveFileToCapacitorPublicStorage(
+  filename: string,
+  blob: Blob
+): Promise<{ saved: boolean; uri?: string; folder?: string }> {
+  if (!isCapacitorNative() || !blob || blob.size === 0) {
+    return { saved: false };
+  }
+
+  const safeFilename = filename.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'noor_elahi_file';
+  const mimeType = safeFilename.toLowerCase().endsWith('.pdf')
+    ? 'application/pdf'
+    : blob.type || 'video/mp4';
+
+  let base64Data = '';
+  try {
+    base64Data = await blobToBase64Raw(blob);
+  } catch {
+    return { saved: false };
+  }
+  if (!base64Data) {
+    return { saved: false };
+  }
+
+  // Primary: Native Android MediaStore.Downloads -> saves into visible Download/NoorElahi/<AdminName>
+  // Works reliably across Android 10-16 Scoped Storage without permission blocks
+  if (isNoorNativeStorageAvailable()) {
+    try {
+      const nativeRes = await saveBase64ToNativePublicStorage({
+        filename: safeFilename,
+        base64Data,
+        mimeType,
+        subfolder: 'NoorElahi',
+      });
+      if (nativeRes?.saved) {
+        return {
+          saved: true,
+          uri: nativeRes.uri,
+          folder: nativeRes.folder || 'Download/NoorElahi',
+        };
+      }
+    } catch {
+      // Fallback to @capacitor/filesystem below
+    }
+  }
+
+  await checkNativeStoragePermission(true);
+
+  const targets: Array<{ directory: Directory; dirPath: string; filePath: string; label: string }> = [
+    {
+      directory: Directory.ExternalStorage,
+      dirPath: 'Download/NoorElahi',
+      filePath: `Download/NoorElahi/${safeFilename}`,
+      label: 'Download/NoorElahi',
+    },
+    {
+      directory: Directory.Documents,
+      dirPath: 'NoorElahi',
+      filePath: `NoorElahi/${safeFilename}`,
+      label: 'Documents/NoorElahi',
+    },
+  ];
+
+  for (const target of targets) {
+    try {
+      await Filesystem.mkdir({
+        path: target.dirPath,
+        directory: target.directory,
+        recursive: true,
+      }).catch(() => {});
+
+      const written = await Filesystem.writeFile({
+        path: target.filePath,
+        data: base64Data,
+        directory: target.directory,
+        recursive: true,
+      });
+
+      let finalUri = written.uri || '';
+      if (!finalUri) {
+        try {
+          const uriRes = await Filesystem.getUri({
+            path: target.filePath,
+            directory: target.directory,
+          });
+          finalUri = uriRes.uri || '';
+        } catch {
+          // Ignore getUri fallback failure
+        }
+      }
+
+      return {
+        saved: true,
+        uri: finalUri || undefined,
+        folder: target.label,
+      };
+    } catch {
+      // Try next public directory target
+    }
+  }
+
+  return { saved: false };
 }

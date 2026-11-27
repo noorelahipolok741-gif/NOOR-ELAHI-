@@ -13,6 +13,7 @@ import {
 import { ClassItem, SUBJECT_LIST, SubjectDoc, SubjectSection } from '../types';
 import { auth, sha256Hex } from '../lib/firebase';
 import { normalizeMediaUrl } from '../lib/offlineStorage';
+import { apiUrl } from '../lib/api';
 
 interface FileVaultModalProps {
   isOpen: boolean;
@@ -147,7 +148,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
       }
 
       // Verify against server-side configured admin vault password
-      let res = await fetch('/api/vault/verify', {
+      let res = await fetch(apiUrl('/api/vault/verify'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -159,7 +160,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
       if (res.status === 403 && auth.currentUser) {
         const refreshedToken = await auth.currentUser.getIdToken(true).catch(() => '');
         if (refreshedToken && refreshedToken !== idToken) {
-          res = await fetch('/api/vault/verify', {
+          res = await fetch(apiUrl('/api/vault/verify'), {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

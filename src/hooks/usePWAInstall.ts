@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -6,11 +7,26 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 export function usePWAInstall() {
+  const isNative = (() => {
+    try {
+      return Capacitor.isNativePlatform();
+    } catch {
+      return false;
+    }
+  })();
+
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [isInstalled, setIsInstalled] = useState(false);
+  const [isInstalled, setIsInstalled] = useState(isNative);
   const [isIOS, setIsIOS] = useState(false);
 
   useEffect(() => {
+    if (isNative) {
+      setIsInstalled(true);
+      setIsIOS(false);
+      setDeferredPrompt(null);
+      return;
+    }
+
     const isStandalone =
       window.matchMedia('(display-mode: standalone)').matches ||
       (window.navigator as unknown as { standalone?: boolean }).standalone === true;
@@ -36,10 +52,10 @@ export function usePWAInstall() {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
       window.removeEventListener('appinstalled', handleAppInstalled);
     };
-  }, []);
+  }, [isNative]);
 
   const install = async () => {
-    if (!deferredPrompt) return false;
+    if (isNative || !deferredPrompt) return false;
     await deferredPrompt.prompt();
     const { outcome } = await deferredPrompt.userChoice;
     if (outcome === 'accepted') {
@@ -51,9 +67,9 @@ export function usePWAInstall() {
   };
 
   return {
-    isInstallable: !!deferredPrompt,
+    isInstallable: !isNative && !!deferredPrompt,
     isInstalled,
-    isIOS,
+    isIOS: !isNative && isIOS,
     install,
   };
 }

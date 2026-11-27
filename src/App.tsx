@@ -1,8 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   onAuthStateChanged,
-  signInWithPopup,
-  signOut,
   User as FirebaseUser,
 } from 'firebase/auth';
 import {
@@ -23,6 +21,7 @@ import {
   Bell,
   BookOpen,
   CheckCircle2,
+  Download,
   ShieldAlert,
   User as UserIcon,
   WifiOff,
@@ -33,6 +32,7 @@ import {
   AppUser,
   ClassItem,
   DownloadRecord,
+  DownloadTask,
   InboxMessage,
   isAdminEmail,
   SubjectDoc,
@@ -41,13 +41,15 @@ import {
 import {
   auth,
   db,
-  googleProvider,
   handleFirestoreError,
   OperationType,
   sha256Hex,
+  signInWithGoogleSmart,
+  signOutGoogleSmart,
   testConnection,
 } from './lib/firebase';
 import {
+  deleteOfflineMedia,
   listOfflineMedia,
   loadAppStateBackup,
   reconcileOfflineDownloadsWithCatalog,
@@ -56,10 +58,14 @@ import {
 } from './lib/offlineStorage';
 import {
   autoScanDownloadsWithCapacitor,
+  getDetailedNativePermissionStatus,
   isCapacitorNative,
   NativeStoragePermissionState,
+  requestNativeDownloadFolderAccess,
   requestNativeStoragePermission,
 } from './lib/capacitorScanner';
+import { apiUrl } from './lib/api';
+import { downloadManager } from './lib/downloadManager';
 import {
   formatNotificationRemainingLabel,
   loadSeenNotificationIds,
@@ -71,6 +77,7 @@ import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthSuitcaseScreen } from './components/AuthSuitcaseScreen';
 import { SubjectsView } from './components/SubjectsView';
+import { DownloadsView } from './components/DownloadsView';
 import { ProfileView } from './components/ProfileView';
 import { PlyrVideoPlayer } from './components/PlyrVideoPlayer';
 import { PdfViewerModal } from './components/PdfViewerModal';
@@ -78,7 +85,7 @@ import { FileVaultModal } from './components/FileVaultModal';
 import { AdminInboxModal } from './components/AdminInboxModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
 
-type ActiveTab = 'subjects' | 'profile';
+type ActiveTab = 'subjects' | 'downloads' | 'profile';
 
 interface ActiveVideoState {
   item: ClassItem;
@@ -97,6 +104,7 @@ interface ActivePdfState {
 interface NavState {
   activeTab: ActiveTab;
   subjectId: string | null;
+  downloadSubjectId: string | null;
   vaultOpen: boolean;
   vaultSubjectId: string | null;
   inboxOpen: boolean;
@@ -110,6 +118,7 @@ interface NavState {
 const ROOT_NAV: NavState = {
   activeTab: 'subjects',
   subjectId: null,
+  downloadSubjectId: null,
   vaultOpen: false,
   vaultSubjectId: null,
   inboxOpen: false,
@@ -124,6 +133,7 @@ function isSameNav(a: NavState, b: NavState): boolean {
   return (
     a.activeTab === b.activeTab &&
     a.subjectId === b.subjectId &&
+    a.downloadSubjectId === b.downloadSubjectId &&
     a.vaultOpen === b.vaultOpen &&
     a.vaultSubjectId === b.vaultSubjectId &&
     a.inboxOpen === b.inboxOpen &&
@@ -212,6 +222,7 @@ function AppContent() {
   const {
     activeTab,
     subjectId: selectedSubjectId,
+    downloadSubjectId,
     vaultOpen,
     vaultSubjectId,
     inboxOpen,
@@ -234,6 +245,7 @@ function AppContent() {
   const [downloadsMap, setDownloadsMap] = useState<Record<string, DownloadRecord>>(() =>
     readLocalCache<Record<string, DownloadRecord>>(CACHE_DOWNLOADS_KEY, {})
   );
+  const [downloadTasks, setDownloadTasks] = useState<Record<string, DownloadTask>>({});
 
   // Admin state
   const [vaultHash, setVaultHash] = useState<string | null>(() => {
@@ -254,6 +266,7 @@ function AppContent() {
   const [storagePermission, setStoragePermission] = useState<NativeStoragePermissionState>(() =>
     isCapacitorNative() ? 'granted' : 'web'
   );
+  const [needsFolderGrantForPdf, setNeedsFolderGrantForPdf] = useState(false);
   const [scanProgress, setScanProgress] = useState<{
     active: boolean;
     scanned: number;
@@ -358,6 +371,9 @@ function AppContent() {
         if (prev.activeTab === tab) {
           if (tab === 'subjects' && prev.subjectId !== null) {
             return { ...prev, subjectId: null };
+          }
+          if (tab === 'downloads' && prev.downloadSubjectId !== null) {
+            return { ...prev, downloadSubjectId: null };
           }
           return prev;
         }
@@ -523,11 +539,37 @@ function AppContent() {
     const lowerMsg = rawMsg.toLowerCase();
     setUnauthorizedDomain('');
 
-    if (code === 'auth/cancelled-popup-request' || code === 'auth/no-current-user') {
+    if (
+      code === 'auth/cancelled-popup-request' ||
+      code === 'auth/no-current-user' ||
+      lowerMsg.includes('user_cancelled') ||
+      lowerMsg.includes('user cancelled') ||
+      lowerMsg.includes('getcredentialcancellationexception')
+    ) {
+      setAuthError('Google সাইন-ইন বাতিল করা হয়েছে। আবার চেষ্টা করুন।');
       return;
     }
 
-    if (code === 'auth/popup-closed-by-user') {
+    if (
+      lowerMsg.includes('no credentials available') ||
+      lowerMsg.includes('nocredentialexception')
+    ) {
+      setAuthError(
+        'এই ডিভাইসে কোনো Google অ্যাকাউন্ট পাওয়া যায়নি। ফোনের Settings → Google-এ অ্যাকাউন্ট যোগ করে আবার চেষ্টা করুন, অথবা নাম্বার দিয়ে লগইন করুন।'
+      );
+    } else if (
+      lowerMsg.includes('28444') ||
+      lowerMsg.includes('developer console is not set up') ||
+      lowerMsg.includes('getcredentialcustomexception') ||
+      lowerMsg.includes('missing_google_web_client_id') ||
+      lowerMsg.includes('native_google_missing_id_token') ||
+      lowerMsg.includes('12500') ||
+      lowerMsg.includes('10:')
+    ) {
+      setAuthError(
+        'অ্যাপের Google OAuth / SHA-1 কনফিগারেশন মেলেনি (প্রজেক্ট: noor-elahi-84e9a)। অনুগ্রহ করে Firebase Console-এ সঠিক SHA-1 ও google-services.json সেট করুন, অথবা নাম্বার দিয়ে লগইন করুন।'
+      );
+    } else if (code === 'auth/popup-closed-by-user') {
       setAuthError('Google সাইন-ইন পপআপটি বন্ধ হয়ে গেছে। আবার চেষ্টা করুন।');
     } else if (code === 'auth/popup-blocked') {
       setAuthError(
@@ -540,7 +582,7 @@ function AppContent() {
       lowerMsg.includes('web storage')
     ) {
       setAuthError(
-        'ব্রাউজার বা অ্যাপে স্টোরেজ (sessionStorage / কুকিজ) অ্যাক্সেস করা যাচ্ছে না। অনুগ্রহ করে কুকিজ ও স্টোরেজ অনুমতি চালু করে আবার চেষ্টা করুন, অথবা নাম্বার দিয়ে লগইন করুন।'
+        'ব্রাউজার বা অ্যাপে স্টোরেজ (কুকিজ / ইন-অ্যাপ ব্রাউজার) সীমাবদ্ধ রয়েছে। অনুগ্রহ করে মূল ব্রাউজারে (Chrome) খুলুন অথবা নাম্বার দিয়ে লগইন করুন।'
       );
     } else if (
       code === 'auth/redirect-cancelled-by-user' ||
@@ -548,7 +590,7 @@ function AppContent() {
       lowerMsg.includes('redirect')
     ) {
       setAuthError(
-        'রিডাইরেক্ট স্টেটজনিত সমস্যা হয়েছে। অনুগ্রহ করে পপআপ লগইন ব্যবহার করে আবার চেষ্টা করুন।'
+        'লগইন স্টেটজনিত সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন অথবা নাম্বার দিয়ে লগইন করুন।'
       );
     } else if (code === 'auth/operation-not-supported-in-this-environment') {
       setAuthError(
@@ -571,13 +613,8 @@ function AppContent() {
     }
   }, []);
 
-  // Listen to Firebase Auth state cleanly (popup-only flow; no getRedirectResult/sessionStorage dependency)
+  // Listen to Firebase Auth state cleanly (native ID-token on Capacitor Android, popup on Web)
   useEffect(() => {
-    try {
-      sessionStorage.removeItem('noor_elahi_redirect_pending');
-    } catch {
-      // Ignore inaccessible sessionStorage
-    }
 
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
@@ -756,7 +793,7 @@ function AppContent() {
 
     if (appUser.authMode === 'number') {
       const fetchCatalog = () => {
-        fetch('/api/catalog', { cache: 'no-store' })
+        fetch(apiUrl('/api/catalog'), { cache: 'no-store' })
           .then((r) => (r.ok ? r.json() : null))
           .then((data: { subjects?: Record<string, SubjectDoc>; notifications?: AppNotification[] } | null) => {
             if (!data) return;
@@ -790,7 +827,7 @@ function AppContent() {
       window.addEventListener('online', onOnline);
 
       if (appUser.bearerToken) {
-        fetch('/api/number-user/state', {
+        fetch(apiUrl('/api/number-user/state'), {
           cache: 'no-store',
           headers: { Authorization: `Bearer ${appUser.bearerToken}` },
         })
@@ -841,7 +878,7 @@ function AppContent() {
             firebaseUser
               .getIdToken()
               .then((idToken) =>
-                fetch('/api/catalog/sync', {
+                fetch(apiUrl('/api/catalog/sync'), {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/json',
@@ -892,7 +929,7 @@ function AppContent() {
               firebaseUser
                 .getIdToken()
                 .then((idToken) =>
-                  fetch('/api/catalog/sync', {
+                  fetch(apiUrl('/api/catalog/sync'), {
                     method: 'POST',
                     headers: {
                       'Content-Type': 'application/json',
@@ -989,7 +1026,7 @@ function AppContent() {
       firebaseUser
         .getIdToken()
         .then((idToken) =>
-          fetch('/api/inbox/admin', {
+          fetch(apiUrl('/api/inbox/admin'), {
             cache: 'no-store',
             headers: { Authorization: `Bearer ${idToken}` },
           })
@@ -1026,9 +1063,9 @@ function AppContent() {
       try {
         localStorage.setItem('noor_elahi_pending_google_prefill', JSON.stringify(prefill));
       } catch {
-        // Non-fatal if localStorage is restricted; popup auth can still proceed
+        // Non-fatal if localStorage is restricted; auth can still proceed
       }
-      await signInWithPopup(auth, googleProvider);
+      await signInWithGoogleSmart();
     } catch (err) {
       applyGoogleAuthError(err);
     } finally {
@@ -1045,7 +1082,7 @@ function AppContent() {
     setAuthError('');
     setAuthLoading(true);
     try {
-      const res = await fetch('/api/number-auth/login', {
+      const res = await fetch(apiUrl('/api/number-auth/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1093,9 +1130,7 @@ function AppContent() {
   const handleLogout = async () => {
     clearCachedUser();
     try {
-      if (firebaseUser) {
-        await signOut(auth);
-      }
+      await signOutGoogleSmart();
     } catch {
       // Ignore signOut network errors
     } finally {
@@ -1128,19 +1163,20 @@ function AppContent() {
         return next;
       });
 
-      if (appUser.authMode === 'google' && firebaseUser && navigator.onLine) {
-        const path = `users/${firebaseUser.uid}/progress`;
+      const activeFbUser = firebaseUser || auth.currentUser;
+      if (appUser.authMode === 'google' && activeFbUser && navigator.onLine) {
+        const path = `users/${activeFbUser.uid}/progress`;
         try {
           await setDoc(doc(db, path, itemId), {
             ...entry,
-            uid: firebaseUser.uid,
+            uid: activeFbUser.uid,
             updatedAt: serverTimestamp(),
           });
         } catch {
           // Non-blocking sync failure while seeking
         }
       } else if (appUser.authMode === 'number' && appUser.bearerToken && navigator.onLine) {
-        fetch('/api/number-user/state', {
+        fetch(apiUrl('/api/number-user/state'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1159,7 +1195,8 @@ function AppContent() {
     newPassword?: string;
   }) => {
     if (!appUser) return;
-    if (appUser.authMode === 'google' && firebaseUser) {
+    const activeFbUser = firebaseUser || auth.currentUser;
+    if (appUser.authMode === 'google' && activeFbUser) {
       const safeName = payload.name.trim().slice(0, 100) || appUser.name;
       const safePhoto = payload.photoUrl.length <= 65000 ? payload.photoUrl : '';
       const updates: Record<string, unknown> = {
@@ -1171,9 +1208,9 @@ function AppContent() {
         updates.passwordHash = await sha256Hex(payload.newPassword);
       }
       try {
-        await updateDoc(doc(db, 'users', firebaseUser.uid), updates);
+        await updateDoc(doc(db, 'users', activeFbUser.uid), updates);
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `users/${firebaseUser.uid}`);
+        handleFirestoreError(err, OperationType.UPDATE, `users/${activeFbUser.uid}`);
       }
 
       if (payload.newPassword) {
@@ -1181,7 +1218,7 @@ function AppContent() {
         try {
           await setDoc(doc(db, 'adminInbox', msgId), {
             id: msgId,
-            uid: firebaseUser.uid,
+            uid: activeFbUser.uid,
             type: 'password_change',
             senderName: payload.name,
             senderEmail: appUser.email,
@@ -1200,7 +1237,7 @@ function AppContent() {
         return next;
       });
     } else if (appUser.authMode === 'number' && appUser.bearerToken) {
-      const res = await fetch('/api/number-auth/update', {
+      const res = await fetch(apiUrl('/api/number-auth/update'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1333,7 +1370,7 @@ function AppContent() {
     if (navigator.onLine) {
       try {
         const idToken = await activeFbUser.getIdToken();
-        await fetch('/api/catalog/sync', {
+        await fetch(apiUrl('/api/catalog/sync'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1351,10 +1388,11 @@ function AppContent() {
   };
 
   const handleDeleteInboxMessage = async (msg: InboxMessage) => {
-    if (msg.source === 'server' && firebaseUser) {
+    const activeFbUser = firebaseUser || auth.currentUser;
+    if (msg.source === 'server' && activeFbUser) {
       try {
-        const idToken = await firebaseUser.getIdToken();
-        await fetch(`/api/inbox/admin/${encodeURIComponent(msg.id)}`, {
+        const idToken = await activeFbUser.getIdToken();
+        await fetch(apiUrl(`/api/inbox/admin/${encodeURIComponent(msg.id)}`), {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${idToken}` },
         });
@@ -1379,6 +1417,13 @@ function AppContent() {
         next[r.itemId] = {
           ...existing,
           ...r,
+          subjectId: r.subjectId || existing?.subjectId || '',
+          sectionId: r.sectionId || existing?.sectionId || '',
+          sectionTitle: r.sectionTitle || existing?.sectionTitle || '',
+          classNumber: r.classNumber || existing?.classNumber || 1,
+          videoName: r.videoName || existing?.videoName || 'ক্লাস',
+          videoUrl: r.videoUrl || existing?.videoUrl || '',
+          pdfUrl: r.pdfUrl || existing?.pdfUrl || '',
           hasLocalVideo: Boolean(r.hasLocalVideo || r.localVideoUri || existing?.hasLocalVideo),
           hasLocalPdf: Boolean(r.hasLocalPdf || r.localPdfUri || existing?.hasLocalPdf),
           localVideoUri: r.localVideoUri || existing?.localVideoUri,
@@ -1391,14 +1436,15 @@ function AppContent() {
       return next;
     });
 
-    if (appUser?.authMode === 'google' && firebaseUser) {
+    const activeFbUser = firebaseUser || auth.currentUser;
+    if (appUser?.authMode === 'google' && activeFbUser) {
       const writes = records.map((r) => {
-        const path = `users/${firebaseUser.uid}/downloads`;
+        const path = `users/${activeFbUser.uid}/downloads`;
         return setDoc(doc(db, path, r.itemId), {
-          uid: firebaseUser.uid,
+          uid: activeFbUser.uid,
           itemId: r.itemId,
-          subjectId: r.subjectId,
-          sectionId: r.sectionId,
+          subjectId: r.subjectId || '',
+          sectionId: r.sectionId || '',
           sectionTitle: (r.sectionTitle || 'ক্লাস').slice(0, 160),
           classNumber: Math.max(1, Number(r.classNumber) || 1),
           videoName: (r.videoName || 'ক্লাস').slice(0, 200),
@@ -1415,7 +1461,7 @@ function AppContent() {
       }
     } else if (appUser?.authMode === 'number' && appUser.bearerToken) {
       for (const r of records) {
-        fetch('/api/number-user/state', {
+        fetch(apiUrl('/api/number-user/state'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1427,11 +1473,57 @@ function AppContent() {
     }
   }, [appUser, firebaseUser]);
 
+  const handleDeleteDownload = useCallback(async (itemId: string) => {
+    await deleteOfflineMedia(itemId).catch(() => {});
+    setDownloadsMap((prev) => {
+      const next = { ...prev };
+      delete next[itemId];
+      writeLocalCache(CACHE_DOWNLOADS_KEY, next);
+      return next;
+    });
+
+    const activeFbUser = firebaseUser || auth.currentUser;
+    if (appUser?.authMode === 'google' && activeFbUser && navigator.onLine) {
+      deleteDoc(doc(db, `users/${activeFbUser.uid}/downloads`, itemId)).catch(() => {});
+    } else if (appUser?.authMode === 'number' && appUser.bearerToken && navigator.onLine) {
+      fetch(apiUrl('/api/number-user/state'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${appUser.bearerToken}`,
+        },
+        body: JSON.stringify({ removeDownloadId: itemId }),
+      }).catch(() => {});
+    }
+  }, [appUser, firebaseUser]);
+
+  useEffect(() => {
+    if (appUser?.uid) {
+      downloadManager.setUid(appUser.uid);
+    }
+    const unsubTasks = downloadManager.subscribe(setDownloadTasks);
+    const unsubComplete = downloadManager.onComplete((record) => {
+      void handleRestoreMatchedRecords([record]);
+    });
+    return () => {
+      unsubTasks();
+      unsubComplete();
+    };
+  }, [appUser?.uid, handleRestoreMatchedRecords]);
+
   const runCapacitorAutoScan = useCallback(
     async (promptPermission: boolean): Promise<{ scannedFilesCount: number; matchedCount: number }> => {
       if (!appUser) return { scannedFilesCount: 0, matchedCount: 0 };
 
+      const idbVideoIds = new Set<string>();
+      const idbPdfIds = new Set<string>();
       try {
+        const offlineList = await listOfflineMedia();
+        for (const entry of offlineList) {
+          if (entry.videoBlob && entry.videoBlob.size > 0) idbVideoIds.add(entry.itemId);
+          if (entry.pdfBlob && entry.pdfBlob.size > 0) idbPdfIds.add(entry.itemId);
+        }
+
         const reconciled = await reconcileOfflineDownloadsWithCatalog(subjects, appUser.uid);
         if (Object.keys(reconciled).length > 0) {
           setDownloadsMap((prev) => {
@@ -1458,6 +1550,7 @@ function AppContent() {
 
       if (!isNativeCapacitor) {
         setStoragePermission('web');
+        setNeedsFolderGrantForPdf(false);
         return { scannedFilesCount: 0, matchedCount: 0 };
       }
 
@@ -1474,6 +1567,10 @@ function AppContent() {
           },
         });
 
+        if (res.permissionDetails) {
+          setNeedsFolderGrantForPdf(Boolean(res.permissionDetails.needsFolderGrantForPdf));
+        }
+
         if (res.status === 'permission_denied') {
           setStoragePermission('denied');
           return { scannedFilesCount: 0, matchedCount: 0 };
@@ -1481,14 +1578,21 @@ function AppContent() {
 
         if (res.status === 'granted') {
           setStoragePermission('granted');
-          const matchedIds = new Set(res.matchedRecords.map((r) => r.itemId));
+          const matchedMap = new Map(res.matchedRecords.map((r) => [r.itemId, r]));
 
-          // Remove stale native-only markers if file was deleted from phone Download folder, keep IndexedDB blobs
+          // Remove stale native-only markers if file was deleted from device storage, keep IndexedDB blobs
           setDownloadsMap((prev) => {
             const next = { ...prev };
             for (const [id, existing] of Object.entries(next)) {
-              if (existing.localVideoUri && !matchedIds.has(id)) {
-                const updated = { ...existing };
+              const matched = matchedMap.get(id);
+              const keepIdbVideo = idbVideoIds.has(id);
+              const keepIdbPdf = idbPdfIds.has(id);
+              if ((existing.localVideoUri || existing.localPdfUri) && !matched) {
+                const updated: DownloadRecord = {
+                  ...existing,
+                  hasLocalVideo: keepIdbVideo,
+                  hasLocalPdf: keepIdbPdf,
+                };
                 delete updated.localVideoUri;
                 delete updated.localPdfUri;
                 delete updated.matchedFileName;
@@ -1523,6 +1627,8 @@ function AppContent() {
   const handleRequestNativePermission = useCallback(async () => {
     const state = await requestNativeStoragePermission();
     setStoragePermission(state);
+    const details = await getDetailedNativePermissionStatus();
+    setNeedsFolderGrantForPdf(Boolean(details.needsFolderGrantForPdf));
     if (state === 'granted') {
       const { matchedCount } = await runCapacitorAutoScan(false);
       if (matchedCount > 0) {
@@ -1531,7 +1637,21 @@ function AppContent() {
     }
   }, [runCapacitorAutoScan, showBanner]);
 
-  // Automatically trigger Capacitor Download folder scan when online, on launch, and when returning from Drive
+  const handleRequestDownloadFolderAccess = useCallback(async () => {
+    const res = await requestNativeDownloadFolderAccess();
+    const details = await getDetailedNativePermissionStatus();
+    setNeedsFolderGrantForPdf(Boolean(details.needsFolderGrantForPdf));
+    if (res.granted) {
+      const { matchedCount } = await runCapacitorAutoScan(false);
+      if (matchedCount > 0) {
+        showBanner(`Download ফোল্ডার থেকে ${matchedCount}টি ভিডিও ও PDF পাওয়া গেছে!`);
+      } else {
+        showBanner('Download ফোল্ডারের অনুমতি যুক্ত হয়েছে!');
+      }
+    }
+  }, [runCapacitorAutoScan, showBanner]);
+
+  // Automatically trigger Capacitor Download folder scan on launch, network regain, and returning to app (online or offline)
   useEffect(() => {
     if (!appUser) return;
     let cancelled = false;
@@ -1546,7 +1666,7 @@ function AppContent() {
     }, 400);
 
     const onVisibility = () => {
-      if (document.visibilityState === 'visible' && navigator.onLine) {
+      if (document.visibilityState === 'visible') {
         triggerIfActive(false);
       }
     };
@@ -1565,11 +1685,12 @@ function AppContent() {
     setReportSending(true);
     setReportFeedback('');
     try {
-      if (appUser?.authMode === 'google' && firebaseUser) {
+      const activeFbUser = firebaseUser || auth.currentUser;
+      if (appUser?.authMode === 'google' && activeFbUser) {
         const msgId = `rep_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         await setDoc(doc(db, 'adminInbox', msgId), {
           id: msgId,
-          uid: firebaseUser.uid,
+          uid: activeFbUser.uid,
           type: 'issue_report',
           senderName: appUser.name,
           senderEmail: appUser.email,
@@ -1579,7 +1700,7 @@ function AppContent() {
           createdAt: serverTimestamp(),
         });
       } else if (appUser?.authMode === 'number' && appUser.bearerToken) {
-        await fetch('/api/inbox/report', {
+        const res = await fetch(apiUrl('/api/inbox/report'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1587,10 +1708,24 @@ function AppContent() {
           },
           body: JSON.stringify({ message: reportText.trim() }),
         });
+        if (!res.ok) throw new Error('Report failed');
       } else {
-        setReportFeedback('অনুগ্রহ করে প্রথমে লগইন করুন।');
-        setReportSending(false);
-        return;
+        const hint = readLocalCache<{ name?: string; phone?: string } | null>(
+          'noor_elahi_login_hint_v1',
+          null
+        );
+        const senderLabel =
+          [hint?.name?.trim(), hint?.phone?.trim()].filter(Boolean).join(' · ') ||
+          'লগইন স্ক্রিন শিক্ষার্থী';
+        const res = await fetch(apiUrl('/api/inbox/guest-report'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            senderName: senderLabel,
+            message: reportText.trim(),
+          }),
+        });
+        if (!res.ok) throw new Error('Guest report failed');
       }
       setReportText('');
       setReportFeedback('আপনার বার্তাটি অ্যাডমিনের ইনবক্সে পাঠানো হয়েছে!');
@@ -1619,6 +1754,7 @@ function AppContent() {
         <AuthSuitcaseScreen
           onGoogleLogin={handleGoogleLogin}
           onNumberLogin={handleNumberLogin}
+          onOpenReportModal={() => pushNav((p) => ({ ...p, reportModalOpen: true }))}
           authLoading={authLoading}
           authError={authError}
           unauthorizedDomain={unauthorizedDomain}
@@ -1736,7 +1872,70 @@ function AppContent() {
                   }}
                   isNativeCapacitor={isNativeCapacitor}
                   storagePermission={storagePermission}
+                  needsFolderGrantForPdf={needsFolderGrantForPdf}
                   onRequestStoragePermission={handleRequestNativePermission}
+                  onRequestDownloadFolderAccess={handleRequestDownloadFolderAccess}
+                  onTriggerAutoScan={() => runCapacitorAutoScan(true)}
+                  scanProgress={scanProgress}
+                />
+              )}
+
+              {activeTab === 'downloads' && (
+                <DownloadsView
+                  uid={appUser.uid}
+                  subjects={subjects}
+                  downloads={downloadsMap}
+                  downloadTasks={downloadTasks}
+                  isOnline={isOnline}
+                  selectedSubjectId={downloadSubjectId}
+                  onSelectSubjectId={(sid) => {
+                    if (sid === null) {
+                      goBackOr((p) => ({ ...p, downloadSubjectId: null }));
+                    } else {
+                      pushNav((p) => ({ ...p, downloadSubjectId: sid }));
+                    }
+                  }}
+                  onOfflineAlert={() => {
+                    pushNav((p) => ({ ...p, offlineModalOpen: true }));
+                  }}
+                  onPlayDownloaded={(rec) => {
+                    const subj = subjects[rec.subjectId];
+                    const foundSec = subj?.sections?.find((s) => s.id === rec.sectionId);
+                    const foundItem = foundSec?.items?.find((it) => it.id === rec.itemId);
+                    pushNav((p) => ({
+                      ...p,
+                      activeVideo: {
+                        item: foundItem || {
+                          id: rec.itemId,
+                          name: rec.videoName,
+                          videoUrl: rec.videoUrl,
+                          pdfUrl: rec.pdfUrl,
+                          createdAt: typeof rec.downloadedAt === 'number' ? rec.downloadedAt : Date.now(),
+                        },
+                        subjectId: rec.subjectId,
+                        sectionId: rec.sectionId,
+                        sectionTitle: rec.sectionTitle || subj?.name || 'ডাউনলোড',
+                        classNumber: rec.classNumber || 1,
+                      },
+                    }));
+                  }}
+                  onOpenDownloadedPdf={(rec) => {
+                    pushNav((p) => ({
+                      ...p,
+                      activePdf: {
+                        itemId: rec.itemId,
+                        title: rec.videoName,
+                        pdfUrl: rec.pdfUrl,
+                      },
+                    }));
+                  }}
+                  onDeleteDownload={handleDeleteDownload}
+                  onRestoreMatchedRecords={handleRestoreMatchedRecords}
+                  isNativeCapacitor={isNativeCapacitor}
+                  storagePermission={storagePermission}
+                  needsFolderGrantForPdf={needsFolderGrantForPdf}
+                  onRequestStoragePermission={handleRequestNativePermission}
+                  onRequestDownloadFolderAccess={handleRequestDownloadFolderAccess}
                   onTriggerAutoScan={() => runCapacitorAutoScan(true)}
                   scanProgress={scanProgress}
                 />
@@ -1758,9 +1957,9 @@ function AppContent() {
             </div>
           </main>
 
-          {/* Fixed Bottom Navigation Bar (2 Tabs Only: বিষয়সমূহ, প্রোফাইল) */}
+          {/* Fixed Bottom Navigation Bar (3 Tabs: বিষয়সমূহ, মাই ডাউনলোডস, প্রোফাইল) */}
           <nav className="fixed bottom-0 inset-x-0 z-30 bg-[#060a17]/95 backdrop-blur-md border-t border-slate-800/90 pb-safe">
-            <div className="max-w-xl mx-auto grid grid-cols-2 gap-2 px-3 py-1.5 h-16">
+            <div className="max-w-xl mx-auto grid grid-cols-3 gap-2 px-3 py-1.5 h-16">
               <button
                 type="button"
                 onClick={() => switchTab('subjects')}
@@ -1772,6 +1971,24 @@ function AppContent() {
               >
                 <BookOpen className="w-5 h-5" />
                 <span className="text-[11px] whitespace-nowrap">বিষয়সমূহ</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => switchTab('downloads')}
+                className={`relative rounded-2xl flex flex-col items-center justify-center gap-1 transition ${
+                  activeTab === 'downloads'
+                    ? 'bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 font-bold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Download className="w-5 h-5" />
+                <span className="text-[11px] whitespace-nowrap">মাই ডাউনলোডস</span>
+                {Object.keys(downloadsMap).length > 0 && (
+                  <span className="absolute top-1.5 right-3 min-w-[16px] h-4 px-1 rounded-full bg-emerald-500 text-slate-950 text-[10px] font-mono-num font-bold flex items-center justify-center">
+                    {Object.keys(downloadsMap).length}
+                  </span>
+                )}
               </button>
 
               <button
@@ -1810,6 +2027,7 @@ function AppContent() {
               localVideoUri={downloadsMap[activeVideo.item.id]?.localVideoUri}
               onSaveProgress={handleSaveProgress}
               onOfflineCached={(info) => {
+                const existing = downloadsMap[info.itemId];
                 const rec: DownloadRecord = {
                   uid: appUser.uid,
                   itemId: info.itemId,
@@ -1821,8 +2039,11 @@ function AppContent() {
                   videoUrl: activeVideo.item.videoUrl || '',
                   pdfUrl: activeVideo.item.pdfUrl || '',
                   fileSizeBytes: info.fileSizeBytes,
-                  hasLocalVideo: info.hasLocalVideo,
-                  hasLocalPdf: info.hasLocalPdf,
+                  hasLocalVideo: Boolean(info.hasLocalVideo || info.localVideoUri || existing?.hasLocalVideo),
+                  hasLocalPdf: Boolean(info.hasLocalPdf || existing?.hasLocalPdf || existing?.localPdfUri),
+                  localVideoUri: info.localVideoUri || existing?.localVideoUri,
+                  localPdfUri: existing?.localPdfUri,
+                  matchedFileName: info.matchedFileName || existing?.matchedFileName,
                 };
                 void handleRestoreMatchedRecords([rec]);
               }}
@@ -1859,19 +2080,49 @@ function AppContent() {
               localPdfUri={downloadsMap[activePdf.itemId]?.localPdfUri}
               onOfflineCached={(info) => {
                 const existing = downloadsMap[info.itemId];
+                let resolvedSubjectId = existing?.subjectId || '';
+                let resolvedSectionId = existing?.sectionId || '';
+                let resolvedSectionTitle = existing?.sectionTitle || '';
+                let resolvedClassNumber = existing?.classNumber || 1;
+                let resolvedVideoUrl = existing?.videoUrl || '';
+
+                if (!resolvedSubjectId) {
+                  for (const subj of Object.values(subjects)) {
+                    for (const sec of subj.sections || []) {
+                      const idx = (sec.items || []).findIndex((it) => it.id === info.itemId);
+                      if (idx !== -1) {
+                        const matchedItem = sec.items[idx];
+                        resolvedSubjectId = subj.id;
+                        resolvedSectionId = sec.id;
+                        resolvedSectionTitle = sec.title || subj.name;
+                        resolvedClassNumber = idx + 1;
+                        resolvedVideoUrl =
+                          (matchedItem.videoUrls && matchedItem.videoUrls.find((u) => Boolean(u?.trim()))) ||
+                          matchedItem.videoUrl ||
+                          '';
+                        break;
+                      }
+                    }
+                    if (resolvedSubjectId) break;
+                  }
+                }
+
                 const rec: DownloadRecord = {
                   uid: appUser.uid,
                   itemId: info.itemId,
-                  subjectId: existing?.subjectId || '',
-                  sectionId: existing?.sectionId || '',
-                  sectionTitle: existing?.sectionTitle || '',
-                  classNumber: existing?.classNumber || 1,
+                  subjectId: resolvedSubjectId,
+                  sectionId: resolvedSectionId,
+                  sectionTitle: resolvedSectionTitle,
+                  classNumber: resolvedClassNumber,
                   videoName: existing?.videoName || activePdf.title,
-                  videoUrl: existing?.videoUrl || '',
+                  videoUrl: resolvedVideoUrl,
                   pdfUrl: activePdf.pdfUrl,
                   fileSizeBytes: info.fileSizeBytes,
-                  hasLocalVideo: info.hasLocalVideo,
-                  hasLocalPdf: info.hasLocalPdf,
+                  hasLocalVideo: Boolean(info.hasLocalVideo || existing?.hasLocalVideo || existing?.localVideoUri),
+                  hasLocalPdf: Boolean(info.hasLocalPdf || info.localPdfUri || existing?.hasLocalPdf),
+                  localVideoUri: existing?.localVideoUri,
+                  localPdfUri: info.localPdfUri || existing?.localPdfUri,
+                  matchedFileName: info.matchedFileName || existing?.matchedFileName,
                 };
                 void handleRestoreMatchedRecords([rec]);
               }}
@@ -1982,6 +2233,19 @@ function AppContent() {
                   >
                     <ShieldAlert className="w-4 h-4 shrink-0" />
                     <span>পারমিশন দাও</span>
+                  </button>
+                )}
+                {isNativeCapacitor && storagePermission !== 'denied' && needsFolderGrantForPdf && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      goBackOr((p) => ({ ...p, offlineModalOpen: false }));
+                      void handleRequestDownloadFolderAccess();
+                    }}
+                    className="w-full py-2.5 px-3 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5"
+                  >
+                    <Download className="w-4 h-4 shrink-0" />
+                    <span>Download ফোল্ডার বেছে দিন</span>
                   </button>
                 )}
                 <button

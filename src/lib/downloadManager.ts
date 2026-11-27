@@ -10,6 +10,8 @@ import {
   saveOfflineMedia,
   saveToInternalDirectoryIfPermitted,
 } from './offlineStorage';
+import { downloadRemoteFileToCapacitorPublicStorage } from './capacitorScanner';
+import { isNoorNativeStorageAvailable } from './noorStoragePlugin';
 
 interface InternalTaskState {
   task: DownloadTask;
@@ -358,6 +360,9 @@ class DownloadManager {
         navigator.storage.persist().catch(() => {});
       }
 
+      let nativeVideoUri: string | undefined;
+      let nativeVideoSize = 0;
+
       const isDriveVideo = Boolean(state.task.videoUrl && getGoogleDriveFileId(state.task.videoUrl));
       const isEmbedOrHls = Boolean(
         state.task.videoUrl &&
@@ -399,24 +404,69 @@ class DownloadManager {
           }
         } else {
           const proxyVideoUrl = resolveDownloadProxyUrl(state.task.videoUrl, `${baseName}.mp4`, 'video');
-          if (!proxyVideoUrl || proxyVideoUrl.startsWith('/api/') === false && !getSafeDownloadUrl(proxyVideoUrl)) {
+          if (!proxyVideoUrl || (!proxyVideoUrl.includes('/api/') && !getSafeDownloadUrl(proxyVideoUrl))) {
             if (state.task.pdfUrl) {
               state.videoDone = true;
             } else {
               throw new Error('সঠিক ডাউনলোড লিংক পাওয়া যায়নি।');
             }
           } else {
-            const headers: Record<string, string> = {};
-            if (state.videoDownloaded > 0) {
-              headers['Range'] = `bytes=${state.videoDownloaded}-`;
+            let handledByNative = false;
+            if (isNoorNativeStorageAvailable()) {
+              const nativeRes = await downloadRemoteFileToCapacitorPublicStorage(
+                proxyVideoUrl,
+                `${baseName}.mp4`,
+                'video/mp4',
+                (ev) => {
+                  if (controller.signal.aborted) return;
+                  const loaded = Number(ev.downloadedBytes || 0);
+                  const total = Number(ev.totalBytes || 0);
+                  if (loaded > 0) {
+                    state.videoDownloaded = loaded;
+                    state.task.downloadedBytes = loaded;
+                  }
+                  if (total > 0) {
+                    state.videoTotal = total;
+                    state.task.totalBytes = total;
+                    const ratio = Math.min(1, loaded / total);
+                    state.task.progress = state.task.pdfUrl
+                      ? Math.max(state.task.progress, Math.round(ratio * 90))
+                      : Math.max(state.task.progress, Math.round(ratio * 100));
+                  } else if (typeof ev.progress === 'number' && ev.progress > 0) {
+                    state.task.progress = Math.max(
+                      state.task.progress,
+                      state.task.pdfUrl ? Math.round(ev.progress * 0.9) : ev.progress
+                    );
+                  }
+                  this.emit(false);
+                }
+              );
+              if (nativeRes.saved && nativeRes.uri) {
+                handledByNative = true;
+                nativeVideoUri = nativeRes.uri;
+                nativeVideoSize = Number(nativeRes.sizeBytes || state.videoDownloaded || 0);
+                state.videoDownloaded = nativeVideoSize;
+                state.videoTotal = nativeVideoSize;
+                state.task.downloadedBytes = nativeVideoSize;
+                state.task.totalBytes = Math.max(state.task.totalBytes, nativeVideoSize);
+                state.task.progress = state.task.pdfUrl ? 90 : 100;
+                state.videoDone = true;
+                this.emit(true);
+              }
             }
 
-            const res = await fetch(proxyVideoUrl, {
-              headers,
-              signal: controller.signal,
-            });
+            if (!handledByNative) {
+              const headers: Record<string, string> = {};
+              if (state.videoDownloaded > 0) {
+                headers['Range'] = `bytes=${state.videoDownloaded}-`;
+              }
 
-            if (!res.ok && res.status !== 206) {
+              const res = await fetch(proxyVideoUrl, {
+                headers,
+                signal: controller.signal,
+              });
+
+              if (!res.ok && res.status !== 206) {
               let resolvedType = '';
               let serverMsg = '';
               try {
@@ -495,13 +545,14 @@ class DownloadManager {
                 this.emit(true);
               }
             }
+            }
           }
         }
       }
 
       // 2. Download PDF alongside Video (with direct CORS fallback & %PDF- validation)
       if (!state.pdfDone && state.task.pdfUrl) {
-        const hasVideoAlready = state.videoChunks.length > 0;
+        const hasVideoAlready = state.videoChunks.length > 0 || Boolean(nativeVideoUri);
         let fetchedPdfBlob: Blob | undefined;
         let pdfFailureReason = '';
 
@@ -594,36 +645,45 @@ class DownloadManager {
       }
 
       const combinedVideoBlob =
-        state.videoChunks.length > 0
+        !nativeVideoUri && state.videoChunks.length > 0
           ? new Blob(state.videoChunks as BlobPart[], { type: 'video/mp4' })
           : undefined;
 
-      const totalSize = (combinedVideoBlob?.size || 0) + (state.pdfBlob?.size || 0);
-      if (totalSize === 0) {
+      const videoBytes = combinedVideoBlob?.size || nativeVideoSize;
+      const totalSize = videoBytes + (state.pdfBlob?.size || 0);
+      if (totalSize === 0 && !nativeVideoUri) {
         throw new Error('ডাউনলোড করা ফাইলটি খালি পাওয়া গেছে। লিংক পরীক্ষা করুন।');
       }
 
-      await saveOfflineMedia({
-        itemId: state.task.itemId,
-        subjectId: state.task.subjectId,
-        sectionId: state.task.sectionId,
-        sectionTitle: state.task.sectionTitle,
-        classNumber: state.task.classNumber,
-        videoName: state.task.videoName,
-        videoUrl: state.task.videoUrl,
-        pdfUrl: state.task.pdfUrl,
-        videoBlob: combinedVideoBlob,
-        pdfBlob: state.pdfBlob,
-        fileSizeBytes: totalSize,
-        savedAt: Date.now(),
-      });
+      if (combinedVideoBlob || state.pdfBlob) {
+        await saveOfflineMedia({
+          itemId: state.task.itemId,
+          subjectId: state.task.subjectId,
+          sectionId: state.task.sectionId,
+          sectionTitle: state.task.sectionTitle,
+          classNumber: state.task.classNumber,
+          videoName: state.task.videoName,
+          videoUrl: state.task.videoUrl,
+          pdfUrl: state.task.pdfUrl,
+          videoBlob: combinedVideoBlob,
+          pdfBlob: state.pdfBlob,
+          fileSizeBytes: totalSize,
+          savedAt: Date.now(),
+        });
+      }
 
-      // Save physical files with admin-given name into user's granted device folder or Downloads
-      await saveToInternalDirectoryIfPermitted(
-        state.task.videoName,
-        combinedVideoBlob,
-        state.pdfBlob
-      );
+      // Save physical files with admin-given name into Download/NoorElahi/ on device
+      const deviceSave =
+        combinedVideoBlob || state.pdfBlob
+          ? await saveToInternalDirectoryIfPermitted(
+              state.task.videoName,
+              combinedVideoBlob,
+              state.pdfBlob
+            )
+          : { saved: Boolean(nativeVideoUri), localVideoUri: undefined, localPdfUri: undefined };
+
+      const finalVideoUri = nativeVideoUri || deviceSave.localVideoUri;
+      const finalPdfUri = deviceSave.localPdfUri;
 
       this.clearTicker(state);
       state.task.progress = 100;
@@ -643,8 +703,11 @@ class DownloadManager {
         videoUrl: state.task.videoUrl,
         pdfUrl: state.task.pdfUrl,
         fileSizeBytes: totalSize,
-        hasLocalVideo: !!combinedVideoBlob,
-        hasLocalPdf: !!state.pdfBlob,
+        hasLocalVideo: Boolean(combinedVideoBlob || finalVideoUri),
+        hasLocalPdf: Boolean(state.pdfBlob || finalPdfUri),
+        localVideoUri: finalVideoUri,
+        localPdfUri: finalPdfUri,
+        matchedFileName: state.task.videoName,
       };
 
       for (const fn of this.completeListeners) {

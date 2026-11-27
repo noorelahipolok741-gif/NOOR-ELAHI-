@@ -1,5 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Capacitor } from '@capacitor/core';
 import App from './App.tsx';
 import './index.css';
 
@@ -135,7 +136,22 @@ function warmServiceWorkerCache(sw: ServiceWorker | null | undefined) {
   }
 }
 
-if ('serviceWorker' in navigator) {
+const isCapacitorNativeApp = (() => {
+  try {
+    return Capacitor.isNativePlatform();
+  } catch {
+    return false;
+  }
+})();
+
+if ('serviceWorker' in navigator && isCapacitorNativeApp) {
+  navigator.serviceWorker
+    .getRegistrations()
+    .then((regs) => Promise.all(regs.map((r) => r.unregister())))
+    .catch(() => {});
+}
+
+if ('serviceWorker' in navigator && !isCapacitorNativeApp) {
   const hadController = Boolean(navigator.serviceWorker.controller);
 
   window.addEventListener('load', () => {

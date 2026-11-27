@@ -8,9 +8,11 @@ import {
   FileText,
   FolderSearch,
   HardDrive,
+  Loader2,
   Pause,
   Play,
   RotateCcw,
+  ShieldAlert,
   ShieldCheck,
   Trash2,
   Video,
@@ -33,6 +35,7 @@ import {
   scanAndRestoreFilesFromDevice,
   StoragePermissionStatus,
 } from '../lib/offlineStorage';
+import { NativeStoragePermissionState } from '../lib/capacitorScanner';
 import { StoragePermissionModal } from './StoragePermissionModal';
 import { useBackOverlay } from '../hooks/useBackHandler';
 
@@ -49,6 +52,18 @@ interface DownloadsViewProps {
   onOpenDownloadedPdf: (record: DownloadRecord) => void;
   onDeleteDownload: (itemId: string) => Promise<void>;
   onRestoreMatchedRecords: (records: DownloadRecord[]) => Promise<void>;
+  isNativeCapacitor?: boolean;
+  storagePermission?: NativeStoragePermissionState;
+  needsFolderGrantForPdf?: boolean;
+  onRequestStoragePermission?: () => Promise<void>;
+  onRequestDownloadFolderAccess?: () => Promise<void>;
+  onTriggerAutoScan?: () => Promise<{ scannedFilesCount: number; matchedCount: number }>;
+  scanProgress?: {
+    active: boolean;
+    scanned: number;
+    total: number;
+    matched: number;
+  } | null;
 }
 
 function formatMB(bytes: number): string {
@@ -69,6 +84,13 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
   onOpenDownloadedPdf,
   onDeleteDownload,
   onRestoreMatchedRecords,
+  isNativeCapacitor = false,
+  storagePermission = 'web',
+  needsFolderGrantForPdf = false,
+  onRequestStoragePermission,
+  onRequestDownloadFolderAccess,
+  onTriggerAutoScan,
+  scanProgress,
 }) => {
   const [localSubjectId, setLocalSubjectId] = useState<string | null>(null);
   const selectedSubjectId =
@@ -141,6 +163,25 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
 
   const triggerDeviceStorageScan = async () => {
     setShowScanPrompt(false);
+
+    if (isNativeCapacitor && onTriggerAutoScan) {
+      setScanning(true);
+      setScanResultMsg(null);
+      try {
+        const { scannedFilesCount, matchedCount } = await onTriggerAutoScan();
+        setScanResultMsg(
+          matchedCount > 0
+            ? `ফোন স্টোরেজ (${scannedFilesCount}টি ফাইল) স্ক্যান করে ${matchedCount}টি ডাউনলোড করা ক্লাস মাই ডাউনলোডস ও সংশ্লিষ্ট বিষয়ে যুক্ত করা হয়েছে!`
+            : `ফোন স্টোরেজ স্ক্যান সম্পন্ন হয়েছে (${scannedFilesCount}টি ফাইল পরীক্ষা করা হয়েছে), তবে File Vault-এর নামের সাথে মিল থাকা কোনো নতুন ভিডিও বা PDF পাওয়া যায়নি।`
+        );
+      } catch {
+        setScanResultMsg('ফোনের স্টোরেজ স্ক্যান করতে সমস্যা হয়েছে। অনুগ্রহ করে পারমিশন পরীক্ষা করুন।');
+      } finally {
+        setScanning(false);
+      }
+      return;
+    }
+
     const win = window as unknown as {
       showDirectoryPicker?: (opts?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
     };
@@ -184,18 +225,24 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
           <div className="space-y-0.5">
             <h2 className="text-base font-bold text-white">মাই ডাউনলোডস</h2>
             <p className="text-xs text-slate-400">
-              ডাউনলোড করা ভিডিও ও PDF আপনার স্টোরেজে সংরক্ষিত থাকে
+              ডাউনলোড ও স্ক্যান করা ভিডিও এবং PDF এখানে অফলাইনে সংরক্ষিত থাকে
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
-              disabled={scanning}
+              disabled={scanning || Boolean(scanProgress?.active)}
               onClick={() => setShowScanPrompt(true)}
-              className="h-10 px-4 rounded-2xl bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 border border-emerald-500/40 text-emerald-300 font-semibold text-xs flex items-center justify-center gap-1.5 hover:border-emerald-400 transition shrink-0"
+              className="h-10 px-4 rounded-2xl bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 border border-emerald-500/40 text-emerald-300 font-semibold text-xs flex items-center justify-center gap-1.5 hover:border-emerald-400 transition shrink-0 disabled:opacity-60"
             >
-              <FolderSearch className="w-4 h-4 shrink-0" />
-              <span>{scanning ? 'স্ক্যান হচ্ছে...' : 'মোবাইল স্টোরেজ স্ক্যান করুন'}</span>
+              {scanning || scanProgress?.active ? (
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+              ) : (
+                <FolderSearch className="w-4 h-4 shrink-0" />
+              )}
+              <span>
+                {scanning || scanProgress?.active ? 'স্ক্যান হচ্ছে...' : 'মোবাইল স্টোরেজ স্ক্যান করুন'}
+              </span>
             </button>
           </div>
         </div>
@@ -207,6 +254,60 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
           </p>
         )}
       </div>
+
+      {isNativeCapacitor && storagePermission === 'denied' && (
+        <div className="rounded-2xl bg-slate-900/95 border border-amber-500/45 px-3.5 py-3 flex items-center justify-between gap-3 text-xs text-amber-200">
+          <div className="flex items-center gap-2 min-w-0">
+            <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+            <span className="min-w-0 leading-relaxed">
+              ফোনের ডাউনলোড করা ভিডিও ও PDF অটো-স্ক্যান করতে স্টোরেজ পারমিশন দিন
+            </span>
+          </div>
+          {onRequestStoragePermission && (
+            <button
+              type="button"
+              onClick={() => void onRequestStoragePermission()}
+              className="shrink-0 px-3 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
+            >
+              পারমিশন দাও
+            </button>
+          )}
+        </div>
+      )}
+
+      {isNativeCapacitor && storagePermission !== 'denied' && needsFolderGrantForPdf && onRequestDownloadFolderAccess && (
+        <div className="rounded-2xl bg-slate-900/95 border border-cyan-500/40 px-3.5 py-3 flex items-center justify-between gap-3 text-xs text-cyan-200">
+          <div className="flex items-center gap-2 min-w-0">
+            <FolderSearch className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span className="min-w-0 leading-relaxed">
+              আগের ডাউনলোড করা PDF ও ভিডিও স্বয়ংক্রিয়ভাবে পুনরুদ্ধার করতে Download ফোল্ডার বেছে দিন
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void onRequestDownloadFolderAccess()}
+            className="shrink-0 px-3 py-1.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs"
+          >
+            ফোল্ডার দিন
+          </button>
+        </div>
+      )}
+
+      {scanProgress?.active && (
+        <div className="rounded-2xl bg-slate-900/90 border border-cyan-500/30 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-cyan-300">
+          <div className="flex items-center gap-2 min-w-0">
+            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+            <span className="truncate">
+              ফোন স্টোরেজ স্ক্যান হচ্ছে ({scanProgress.scanned}/{scanProgress.total})...
+            </span>
+          </div>
+          {scanProgress.matched > 0 && (
+            <span className="shrink-0 font-mono-num text-emerald-300 font-semibold">
+              {scanProgress.matched}টি পাওয়া গেছে
+            </span>
+          )}
+        </div>
+      )}
 
       {scanResultMsg && (
         <div className="rounded-2xl bg-cyan-500/10 border border-cyan-500/30 px-4 py-3 flex items-center justify-between gap-3 text-xs text-cyan-200">
@@ -375,29 +476,50 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
             </div>
           ) : (
             <div className="space-y-3.5">
-              {subjectDownloads.map((rec) => (
+              {subjectDownloads.map((rec) => {
+                const hasLocalVideo = Boolean(rec.hasLocalVideo || rec.localVideoUri);
+                const hasLocalPdf = Boolean(rec.hasLocalPdf || rec.localPdfUri);
+                return (
                 <div
                   key={rec.itemId}
                   className="rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 border border-slate-800 p-4 space-y-3"
                 >
                   {/* Header: Section Title + Class Number + Video Name + Export + Delete */}
                   <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
+                    <div className="min-w-0 space-y-0.5">
                       <p className="text-xs font-semibold text-emerald-400 truncate">
-                        {rec.sectionTitle} · ক্লাস {rec.classNumber}
+                        {rec.sectionTitle || selectedMeta.name} · ক্লাস {rec.classNumber}
                       </p>
                       <h4 className="text-sm sm:text-base font-bold text-white truncate">
                         {rec.videoName}
                       </h4>
+                      {rec.matchedFileName && (
+                        <p className="text-[11px] text-cyan-300/90 truncate">
+                          ডিভাইস ফাইল: {rec.matchedFileName}
+                        </p>
+                      )}
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
-                      {(rec.hasLocalVideo || rec.hasLocalPdf) && (
+                      {(hasLocalVideo || hasLocalPdf) && (
                         <button
                           type="button"
                           onClick={async () => {
-                            const ok = await exportOfflineItemToPhone(rec.itemId, rec.videoName);
-                            if (ok) {
-                              setScanResultMsg(`“${rec.videoName}” আপনার মোবাইলের ফোল্ডার / Downloads-এ সেভ করা হয়েছে।`);
+                            const res = await exportOfflineItemToPhone(rec.itemId, rec.videoName);
+                            if (res.ok) {
+                              if (res.localVideoUri || res.localPdfUri) {
+                                await onRestoreMatchedRecords([
+                                  {
+                                    ...rec,
+                                    localVideoUri: res.localVideoUri || rec.localVideoUri,
+                                    localPdfUri: res.localPdfUri || rec.localPdfUri,
+                                  },
+                                ]);
+                              }
+                              setScanResultMsg(
+                                res.folder
+                                  ? `“${rec.videoName}” আপনার ফোনের ${res.folder} ফোল্ডারে সেভ করা হয়েছে।`
+                                  : `“${rec.videoName}” আপনার মোবাইলের ফোল্ডার / Downloads-এ সেভ করা হয়েছে।`
+                              );
                             }
                           }}
                           className="h-9 px-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/20 text-[11px] font-semibold flex items-center gap-1 transition"
@@ -422,9 +544,9 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                   <div className="grid grid-cols-2 gap-2.5">
                     <button
                       type="button"
-                      disabled={!rec.videoUrl && !rec.hasLocalVideo}
+                      disabled={!rec.videoUrl && !hasLocalVideo}
                       onClick={() => {
-                        if (!isOnline && !rec.hasLocalVideo) {
+                        if (!isOnline && !hasLocalVideo) {
                           onOfflineAlert();
                           return;
                         }
@@ -438,9 +560,9 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
 
                     <button
                       type="button"
-                      disabled={!rec.pdfUrl && !rec.hasLocalPdf}
+                      disabled={!rec.pdfUrl && !hasLocalPdf}
                       onClick={() => {
-                        if (!isOnline && !rec.hasLocalPdf) {
+                        if (!isOnline && !hasLocalPdf) {
                           onOfflineAlert();
                           return;
                         }
@@ -453,7 +575,8 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -504,6 +627,19 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
             <p className="text-sm text-slate-300 leading-relaxed">
               আপনার ফোনের ইন্টারনাল স্টোরেজে আগে থেকে ডাউনলোড করা ভিডিও এবং PDF স্ক্যান করতে ফোল্ডার বা ফাইল নির্বাচন করার অনুমতি দিন। File Vault এর নামের সাথে মিল পেলে সেগুলো স্বয়ংক্রিয়ভাবে মাই ডাউনলোডসে যুক্ত হয়ে যাবে।
             </p>
+            {isNativeCapacitor && needsFolderGrantForPdf && onRequestDownloadFolderAccess && (
+              <button
+                type="button"
+                onClick={async () => {
+                  setShowScanPrompt(false);
+                  await onRequestDownloadFolderAccess();
+                }}
+                className="w-full py-2.5 px-3 rounded-xl bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 text-xs font-bold flex items-center justify-center gap-2"
+              >
+                <FolderSearch className="w-4 h-4 text-cyan-300 shrink-0" />
+                <span>Download ফোল্ডার বেছে দিন (পুরোনো PDF সহ)</span>
+              </button>
+            )}
             <div className="flex items-center gap-3">
               <button
                 type="button"
@@ -517,7 +653,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                 onClick={triggerDeviceStorageScan}
                 className="flex-1 py-2.5 rounded-xl bg-emerald-500 text-slate-950 text-sm font-bold"
               >
-                অনুমতি দিন
+                অটো স্ক্যান করুন
               </button>
             </div>
           </div>

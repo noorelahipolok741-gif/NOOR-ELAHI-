@@ -22,10 +22,12 @@ import {
   getSafeDownloadUrl,
   normalizeMediaUrl,
   resolveStreamUrl,
+  safeOpenExternalUrl,
   sanitizeBaseFilename,
   saveOfflineBlobForClass,
+  saveToInternalDirectoryIfPermitted,
 } from '../lib/offlineStorage';
-import { readNativePdfAsBlob } from '../lib/capacitorScanner';
+import { isCapacitorNative, readNativePdfAsBlob } from '../lib/capacitorScanner';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
@@ -41,6 +43,8 @@ interface PdfViewerModalProps {
     fileSizeBytes: number;
     hasLocalVideo: boolean;
     hasLocalPdf: boolean;
+    localPdfUri?: string;
+    matchedFileName?: string;
   }) => void;
 }
 
@@ -346,6 +350,8 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [savingPdf, setSavingPdf] = useState(false);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -521,12 +527,25 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                       pdfUrl,
                       pdfBlob: directBlob,
                     })
-                      .then((entry) => {
+                      .then(async (entry) => {
+                        let localSavedUri: string | undefined;
+                        if (isCapacitorNative() && !localPdfUri) {
+                          const dev = await saveToInternalDirectoryIfPermitted(
+                            title || 'document',
+                            undefined,
+                            directBlob
+                          ).catch(() => null);
+                          localSavedUri = dev?.localPdfUri;
+                        }
                         onOfflineCached?.({
                           itemId,
                           fileSizeBytes: entry.fileSizeBytes,
                           hasLocalVideo: Boolean(entry.videoBlob),
-                          hasLocalPdf: Boolean(entry.pdfBlob),
+                          hasLocalPdf: Boolean(entry.pdfBlob || localSavedUri),
+                          localPdfUri: localSavedUri,
+                          matchedFileName: localSavedUri
+                            ? `${sanitizeBaseFilename(title || 'document')}.pdf`
+                            : undefined,
                         });
                       })
                       .catch(() => {});
@@ -610,12 +629,25 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           pdfUrl,
           pdfBlob: fetchedBlob,
         })
-          .then((entry) => {
+          .then(async (entry) => {
+            let localSavedUri: string | undefined;
+            if (isCapacitorNative() && !localPdfUri) {
+              const dev = await saveToInternalDirectoryIfPermitted(
+                title || 'document',
+                undefined,
+                fetchedBlob
+              ).catch(() => null);
+              localSavedUri = dev?.localPdfUri;
+            }
             onOfflineCached?.({
               itemId,
               fileSizeBytes: entry.fileSizeBytes,
               hasLocalVideo: Boolean(entry.videoBlob),
-              hasLocalPdf: Boolean(entry.pdfBlob),
+              hasLocalPdf: Boolean(entry.pdfBlob || localSavedUri),
+              localPdfUri: localSavedUri,
+              matchedFileName: localSavedUri
+                ? `${sanitizeBaseFilename(title || 'document')}.pdf`
+                : undefined,
             });
           })
           .catch(() => {});
@@ -804,6 +836,63 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     }
   };
 
+  const handleSavePdfClick = async () => {
+    if (savingPdf) return;
+    setSavingPdf(true);
+    setSaveNotice(null);
+    try {
+      let targetBlob = pdfBlob;
+      if (!targetBlob && typeof navigator !== 'undefined' && navigator.onLine && pdfUrl) {
+        const proxyTarget = resolveStreamUrl(normalizeMediaUrl(pdfUrl), 'pdf');
+        if (proxyTarget) {
+          const r = await fetch(proxyTarget);
+          if (r.ok) {
+            const b = await r.blob();
+            if (b && (await blobStartsWithPdfHeader(b))) {
+              targetBlob = b;
+            }
+          }
+        }
+      }
+
+      if (targetBlob) {
+        const entry = await saveOfflineBlobForClass({
+          itemId,
+          videoName: title,
+          pdfUrl,
+          pdfBlob: targetBlob,
+        });
+        const deviceSave = await saveToInternalDirectoryIfPermitted(
+          title || 'document',
+          undefined,
+          targetBlob
+        );
+        onOfflineCached?.({
+          itemId,
+          fileSizeBytes: entry.fileSizeBytes,
+          hasLocalVideo: Boolean(entry.videoBlob && entry.videoBlob.size > 0),
+          hasLocalPdf: true,
+          localPdfUri: deviceSave.localPdfUri,
+          matchedFileName: downloadFilename,
+        });
+        setSaveNotice(
+          deviceSave.folder
+            ? `PDF সফলভাবে ফোনের ${deviceSave.folder} ফোল্ডারে সেভ হয়েছে!`
+            : 'PDF সফলভাবে অফলাইনে সেভ হয়েছে!'
+        );
+        return;
+      }
+
+      if (safePdfUrl) {
+        safeOpenExternalUrl(safePdfUrl);
+      }
+    } catch {
+      setSaveNotice('PDF সেভ করতে সমস্যা হয়েছে। মোবাইল ভিউয়ার থেকে ডাউনলোড করুন।');
+    } finally {
+      setSavingPdf(false);
+    }
+  };
+
   const progressPct =
     loadProgress && loadProgress.total > 0
       ? Math.min(100, Math.round((loadProgress.loaded / loadProgress.total) * 100))
@@ -867,42 +956,59 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           )}
 
           {directSaveHref && (
-            <a
-              href={directSaveHref}
-              download={blobUrl ? downloadFilename : undefined}
-              target={blobUrl ? undefined : '_blank'}
-              rel={blobUrl ? undefined : 'noopener noreferrer'}
-              onClick={() => {
-                if (!blobUrl && typeof navigator !== 'undefined' && navigator.onLine && pdfUrl) {
-                  const proxyTarget = resolveStreamUrl(normalizeMediaUrl(pdfUrl), 'pdf');
-                  if (proxyTarget) {
-                    fetch(proxyTarget)
-                      .then((r) => (r.ok ? r.blob() : null))
-                      .then(async (b) => {
-                        if (!b || !(await blobStartsWithPdfHeader(b))) return;
-                        const entry = await saveOfflineBlobForClass({
-                          itemId,
-                          videoName: title,
-                          pdfUrl,
-                          pdfBlob: b,
-                        });
-                        onOfflineCached?.({
-                          itemId,
-                          fileSizeBytes: entry.fileSizeBytes,
-                          hasLocalVideo: Boolean(entry.videoBlob && entry.videoBlob.size > 0),
-                          hasLocalPdf: Boolean(entry.pdfBlob && entry.pdfBlob.size > 0),
-                        });
-                      })
-                      .catch(() => {});
+            isCapacitorNative() ? (
+              <button
+                type="button"
+                disabled={savingPdf}
+                onClick={() => void handleSavePdfClick()}
+                className="flex items-center gap-1 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 px-2.5 py-2 text-xs font-semibold text-emerald-300 transition disabled:opacity-60"
+                title="মোবাইলে PDF সেভ করুন"
+              >
+                {savingPdf ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                ) : (
+                  <Download className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>{savingPdf ? 'সেভ হচ্ছে' : 'সেভ'}</span>
+              </button>
+            ) : (
+              <a
+                href={directSaveHref}
+                download={blobUrl ? downloadFilename : undefined}
+                target={blobUrl ? undefined : '_blank'}
+                rel={blobUrl ? undefined : 'noopener noreferrer'}
+                onClick={() => {
+                  if (!blobUrl && typeof navigator !== 'undefined' && navigator.onLine && pdfUrl) {
+                    const proxyTarget = resolveStreamUrl(normalizeMediaUrl(pdfUrl), 'pdf');
+                    if (proxyTarget) {
+                      fetch(proxyTarget)
+                        .then((r) => (r.ok ? r.blob() : null))
+                        .then(async (b) => {
+                          if (!b || !(await blobStartsWithPdfHeader(b))) return;
+                          const entry = await saveOfflineBlobForClass({
+                            itemId,
+                            videoName: title,
+                            pdfUrl,
+                            pdfBlob: b,
+                          });
+                          onOfflineCached?.({
+                            itemId,
+                            fileSizeBytes: entry.fileSizeBytes,
+                            hasLocalVideo: Boolean(entry.videoBlob && entry.videoBlob.size > 0),
+                            hasLocalPdf: Boolean(entry.pdfBlob && entry.pdfBlob.size > 0),
+                          });
+                        })
+                        .catch(() => {});
+                    }
                   }
-                }
-              }}
-              className="flex items-center gap-1 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 px-2.5 py-2 text-xs font-semibold text-emerald-300 transition"
-              title="মোবাইলে PDF সেভ করুন"
-            >
-              <Download className="w-3.5 h-3.5 shrink-0" />
-              <span>সেভ</span>
-            </a>
+                }}
+                className="flex items-center gap-1 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 px-2.5 py-2 text-xs font-semibold text-emerald-300 transition"
+                title="মোবাইলে PDF সেভ করুন"
+              >
+                <Download className="w-3.5 h-3.5 shrink-0" />
+                <span>সেভ</span>
+              </a>
+            )
           )}
 
           {directExternalHref && (
@@ -928,6 +1034,12 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           </button>
         </div>
       </div>
+
+      {saveNotice && (
+        <div className="px-3 sm:px-4 py-2 bg-emerald-500/15 border-b border-emerald-500/30 text-xs text-emerald-300 text-center shrink-0">
+          {saveNotice}
+        </div>
+      )}
 
       {viewerMode === 'iframe' && fallbackNotice && (
         <div className="px-3 sm:px-4 py-2 bg-cyan-500/10 border-b border-cyan-500/25 flex items-center justify-between gap-2 text-[11px] text-cyan-200 shrink-0">

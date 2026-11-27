@@ -8,6 +8,10 @@ import {
   GoogleAuthProvider,
   indexedDBLocalPersistence,
   initializeAuth,
+  signInWithCredential,
+  signInWithPopup,
+  signOut,
+  UserCredential,
 } from 'firebase/auth';
 import {
   doc,
@@ -19,6 +23,8 @@ import {
   persistentMultipleTabManager,
 } from 'firebase/firestore';
 import { getAnalytics, isSupported } from 'firebase/analytics';
+import { Capacitor } from '@capacitor/core';
+import { SocialLogin } from '@capgo/capacitor-social-login';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
@@ -38,14 +44,26 @@ try {
   firestoreInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 }
 
+function isSessionStorageAccessible(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const probeKey = '__noor_elahi_ss_probe__';
+    window.sessionStorage.setItem(probeKey, '1');
+    window.sessionStorage.removeItem(probeKey);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const authPersistence = isSessionStorageAccessible()
+  ? [indexedDBLocalPersistence, browserLocalPersistence, browserSessionPersistence]
+  : [indexedDBLocalPersistence, browserLocalPersistence];
+
 let authInstance: Auth;
 try {
   authInstance = initializeAuth(app, {
-    persistence: [
-      indexedDBLocalPersistence,
-      browserLocalPersistence,
-      browserSessionPersistence,
-    ],
+    persistence: authPersistence,
     popupRedirectResolver: browserPopupRedirectResolver,
   });
 } catch {
@@ -56,6 +74,67 @@ export const db = firestoreInstance;
 export const auth = authInstance;
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+let socialLoginInitialized = false;
+
+async function ensureNativeSocialLoginInitialized(): Promise<void> {
+  if (socialLoginInitialized) return;
+  const webClientId =
+    import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID?.trim() || firebaseConfig.oAuthClientId;
+  if (!webClientId) {
+    throw new Error('MISSING_GOOGLE_WEB_CLIENT_ID');
+  }
+  await SocialLogin.initialize({
+    google: {
+      webClientId,
+      mode: 'online',
+      skipAuthOnlyAuthorizationAfterSignIn: true,
+    },
+  });
+  socialLoginInitialized = true;
+}
+
+/**
+ * Signs in with Google reliably across both Capacitor Native (Android/iOS) and Web/PWA:
+ * - On Capacitor Native: Uses native Credential Manager / Google Sign-In to fetch an ID token
+ *   and authenticates with Firebase via signInWithCredential (never touches WebView sessionStorage or redirects).
+ * - On Web / Mobile Browser: Uses signInWithPopup cleanly (never signInWithRedirect).
+ */
+export async function signInWithGoogleSmart(): Promise<UserCredential> {
+  if (Capacitor.isNativePlatform()) {
+    await ensureNativeSocialLoginInitialized();
+    const res = await SocialLogin.login({
+      provider: 'google',
+      options: {
+        style: 'standard',
+      },
+    });
+    const googleResult = res?.result;
+    const idToken =
+      googleResult && googleResult.responseType === 'online' ? googleResult.idToken : null;
+    if (!idToken) {
+      throw new Error('NATIVE_GOOGLE_MISSING_ID_TOKEN');
+    }
+    const credential = GoogleAuthProvider.credential(idToken);
+    return await signInWithCredential(auth, credential);
+  }
+
+  return await signInWithPopup(auth, googleProvider);
+}
+
+export async function signOutGoogleSmart(): Promise<void> {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      await ensureNativeSocialLoginInitialized();
+      await SocialLogin.logout({ provider: 'google' });
+    } catch {
+      // Ignore native social logout errors if not signed in natively
+    }
+  }
+  if (auth.currentUser) {
+    await signOut(auth);
+  }
+}
 
 if (typeof window !== 'undefined') {
   isSupported()

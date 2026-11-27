@@ -54,7 +54,9 @@ interface SubjectsViewProps {
   onOfflineAlert: (target?: OfflineTargetPayload) => void;
   isNativeCapacitor?: boolean;
   storagePermission?: NativeStoragePermissionState;
+  needsFolderGrantForPdf?: boolean;
   onRequestStoragePermission?: () => Promise<void>;
+  onRequestDownloadFolderAccess?: () => Promise<void>;
   onTriggerAutoScan?: () => Promise<{ scannedFilesCount: number; matchedCount: number }>;
   scanProgress?: {
     active: boolean;
@@ -116,7 +118,9 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
   onOfflineAlert,
   isNativeCapacitor = false,
   storagePermission = 'web',
+  needsFolderGrantForPdf = false,
   onRequestStoragePermission,
+  onRequestDownloadFolderAccess,
   onTriggerAutoScan,
   scanProgress,
 }) => {
@@ -225,6 +229,24 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                 পারমিশন দাও
               </button>
             )}
+          </div>
+        )}
+
+        {isNativeCapacitor && storagePermission !== 'denied' && needsFolderGrantForPdf && onRequestDownloadFolderAccess && (
+          <div className="rounded-2xl bg-slate-900/95 border border-cyan-500/40 px-3.5 py-3 flex items-center justify-between gap-3 text-xs text-cyan-200">
+            <div className="flex items-center gap-2 min-w-0">
+              <ShieldAlert className="w-4 h-4 text-cyan-400 shrink-0" />
+              <span className="min-w-0 leading-relaxed">
+                আগের ডাউনলোড করা PDF ও ভিডিও অটো স্ক্যান করতে Download ফোল্ডারের অনুমতি দিন
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void onRequestDownloadFolderAccess()}
+              className="shrink-0 px-3 py-1.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs"
+            >
+              ফোল্ডার দিন
+            </button>
           </div>
         )}
 

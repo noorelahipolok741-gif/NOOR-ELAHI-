@@ -1,4 +1,5 @@
 import { DownloadRecord, SubjectDoc } from '../types';
+import { apiUrl } from './api';
 
 const DB_NAME = 'noor_elahi_offline_v3';
 const DB_VERSION = 2;
@@ -515,7 +516,7 @@ export function resolveStreamUrl(rawUrl: string, kind?: 'video' | 'pdf'): string
   const normalized = normalizeMediaUrl(rawUrl);
   if (!normalized) return '';
   if (normalized.startsWith('blob:') || normalized.startsWith('data:') || normalized.startsWith('/api/')) {
-    return normalized;
+    return normalized.startsWith('/api/') ? apiUrl(normalized) : normalized;
   }
   if (normalized.startsWith('/')) {
     return '';
@@ -524,26 +525,28 @@ export function resolveStreamUrl(rawUrl: string, kind?: 'video' | 'pdf'): string
     return normalized;
   }
   const kindParam = kind ? `&kind=${kind}` : '';
-  return `/api/proxy-media?u=${encodeURIComponent(encodeProxyParam(normalized))}${kindParam}`;
+  return apiUrl(`/api/proxy-media?u=${encodeURIComponent(encodeProxyParam(normalized))}${kindParam}`);
 }
 
 export function resolveHlsProxyUrl(rawUrl: string): string {
   const normalized = normalizeMediaUrl(rawUrl);
   if (!normalized || normalized.startsWith('/')) return '';
-  return `/api/proxy-hls?u=${encodeURIComponent(encodeProxyParam(normalized))}`;
+  return apiUrl(`/api/proxy-hls?u=${encodeURIComponent(encodeProxyParam(normalized))}`);
 }
 
 export function resolveDownloadProxyUrl(rawUrl: string, filename: string, kind?: 'video' | 'pdf'): string {
   const normalized = normalizeMediaUrl(rawUrl);
   if (!normalized) return '';
   if (normalized.startsWith('blob:') || normalized.startsWith('data:') || normalized.startsWith('/api/')) {
-    return normalized;
+    return normalized.startsWith('/api/') ? apiUrl(normalized) : normalized;
   }
   if (normalized.startsWith('/')) {
     return '';
   }
   const kindParam = kind ? `&kind=${kind}` : '';
-  return `/api/proxy-media?u=${encodeURIComponent(encodeProxyParam(normalized))}&filename=${encodeURIComponent(filename)}&download=1${kindParam}`;
+  return apiUrl(
+    `/api/proxy-media?u=${encodeURIComponent(encodeProxyParam(normalized))}&filename=${encodeURIComponent(filename)}&download=1${kindParam}`
+  );
 }
 
 export function sanitizeBaseFilename(name: string): string {
@@ -712,11 +715,18 @@ async function getWritableDirectoryHandle(): Promise<FileSystemDirectoryHandle |
   }
 }
 
+export interface SavedToDeviceResult {
+  saved: boolean;
+  localVideoUri?: string;
+  localPdfUri?: string;
+  folder?: string;
+}
+
 export async function saveToInternalDirectoryIfPermitted(
   videoName: string,
   videoBlob?: Blob,
   pdfBlob?: Blob
-): Promise<boolean> {
+): Promise<SavedToDeviceResult> {
   const baseName = sanitizeBaseFilename(videoName);
   try {
     if (navigator.storage?.persist) {
@@ -724,6 +734,41 @@ export async function saveToInternalDirectoryIfPermitted(
     }
   } catch {
     // Ignore persist failure
+  }
+
+  try {
+    const { isCapacitorNative, saveFileToCapacitorPublicStorage } = await import(
+      './capacitorScanner'
+    );
+    if (isCapacitorNative()) {
+      let localVideoUri: string | undefined;
+      let localPdfUri: string | undefined;
+      let folder: string | undefined;
+
+      if (videoBlob && videoBlob.size > 0) {
+        const resV = await saveFileToCapacitorPublicStorage(`${baseName}.mp4`, videoBlob);
+        if (resV.saved) {
+          localVideoUri = resV.uri;
+          folder = resV.folder;
+        }
+      }
+      if (pdfBlob && pdfBlob.size > 0) {
+        const resP = await saveFileToCapacitorPublicStorage(`${baseName}.pdf`, pdfBlob);
+        if (resP.saved) {
+          localPdfUri = resP.uri;
+          folder = folder || resP.folder;
+        }
+      }
+
+      return {
+        saved: Boolean(localVideoUri || localPdfUri),
+        localVideoUri,
+        localPdfUri,
+        folder,
+      };
+    }
+  } catch {
+    // Continue with web storage fallback
   }
 
   try {
@@ -741,7 +786,7 @@ export async function saveToInternalDirectoryIfPermitted(
         await writable.write(pdfBlob);
         await writable.close();
       }
-      return true;
+      return { saved: true, folder: dirHandle.name };
     }
   } catch {
     // Fallback to browser Downloads folder below
@@ -759,21 +804,31 @@ export async function saveToInternalDirectoryIfPermitted(
     if (videoBlob) triggerBrowserSave(videoBlob, `${baseName}.mp4`);
     if (pdfBlob) triggerBrowserSave(pdfBlob, `${baseName}.pdf`);
   }
-  return false;
+  return { saved: false };
 }
 
 export async function exportOfflineItemToPhone(
   itemId: string,
   videoName: string
-): Promise<boolean> {
+): Promise<{
+  ok: boolean;
+  folder?: string;
+  localVideoUri?: string;
+  localPdfUri?: string;
+}> {
   const entry = await getOfflineMedia(itemId);
-  if (!entry) return false;
-  const savedToFolder = await saveToInternalDirectoryIfPermitted(
+  if (!entry) return { ok: false };
+  const result = await saveToInternalDirectoryIfPermitted(
     videoName,
     entry.videoBlob,
     entry.pdfBlob
   );
-  return savedToFolder || Boolean(entry.videoBlob || entry.pdfBlob);
+  return {
+    ok: result.saved || Boolean(entry.videoBlob || entry.pdfBlob),
+    folder: result.folder,
+    localVideoUri: result.localVideoUri,
+    localPdfUri: result.localPdfUri,
+  };
 }
 
 export async function requestInternalFolderHandle(): Promise<FileSystemDirectoryHandle | null> {

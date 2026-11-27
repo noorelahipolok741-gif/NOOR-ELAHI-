@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Camera, Check, Chrome, Copy, Lock, Phone, User, WifiOff } from 'lucide-react';
+import { AlertTriangle, Camera, Check, Chrome, Copy, Lock, Phone, User, WifiOff } from 'lucide-react';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { useBackOverlay } from '../hooks/useBackHandler';
 
@@ -12,6 +12,7 @@ interface AuthSuitcaseScreenProps {
     name: string;
     photoUrl: string;
   }) => Promise<void>;
+  onOpenReportModal?: () => void;
   authLoading: boolean;
   authError: string;
   unauthorizedDomain?: string;
@@ -59,6 +60,7 @@ async function compressImageToDataUrl(file: File): Promise<string> {
 export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
   onGoogleLogin,
   onNumberLogin,
+  onOpenReportModal,
   authLoading,
   authError,
   unauthorizedDomain,
@@ -435,6 +437,20 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
                 <Phone className="w-4 h-4 text-cyan-400 shrink-0" />
                 <span>{showNumberForm ? 'নাম্বার বক্স লুকান' : 'সাইন ইন উইথ নাম্বার'}</span>
               </button>
+
+              {onOpenReportModal && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    persistHint();
+                    onOpenReportModal();
+                  }}
+                  className="w-full h-11 rounded-2xl bg-amber-500/10 border border-amber-500/30 hover:border-amber-400/60 text-amber-200 font-semibold text-xs flex items-center justify-center gap-2 active:scale-[0.98] transition"
+                >
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>অ্যাপের সমস্যা সম্পর্কে এডমিনকে জানান</span>
+                </button>
+              )}
             </div>
           </motion.div>
         </div>
