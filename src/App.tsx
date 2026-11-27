@@ -1,9 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
-  signInWithRedirect,
   signOut,
   User as FirebaseUser,
 } from 'firebase/auth';
@@ -521,14 +519,41 @@ function AppContent() {
 
   const applyGoogleAuthError = useCallback((err: unknown) => {
     const code = (err as { code?: string } | null)?.code || '';
+    const rawMsg = err instanceof Error ? err.message : String(err || '');
+    const lowerMsg = rawMsg.toLowerCase();
     setUnauthorizedDomain('');
+
     if (code === 'auth/cancelled-popup-request' || code === 'auth/no-current-user') {
       return;
     }
+
     if (code === 'auth/popup-closed-by-user') {
       setAuthError('Google সাইন-ইন পপআপটি বন্ধ হয়ে গেছে। আবার চেষ্টা করুন।');
     } else if (code === 'auth/popup-blocked') {
-      setAuthError('ব্রাউজারে পপআপ ব্লক করা আছে। পপআপ অনুমতি দিয়ে আবার চেষ্টা করুন।');
+      setAuthError(
+        'ব্রাউজারে পপআপ ব্লক করা আছে। পপআপ অনুমতি (Allow Popups) চালু করে আবার চেষ্টা করুন।'
+      );
+    } else if (
+      code === 'auth/web-storage-unsupported' ||
+      lowerMsg.includes('missing initial state') ||
+      lowerMsg.includes('sessionstorage') ||
+      lowerMsg.includes('web storage')
+    ) {
+      setAuthError(
+        'ব্রাউজার বা অ্যাপে স্টোরেজ (sessionStorage / কুকিজ) অ্যাক্সেস করা যাচ্ছে না। অনুগ্রহ করে কুকিজ ও স্টোরেজ অনুমতি চালু করে আবার চেষ্টা করুন, অথবা নাম্বার দিয়ে লগইন করুন।'
+      );
+    } else if (
+      code === 'auth/redirect-cancelled-by-user' ||
+      code === 'auth/redirect-operation-pending' ||
+      lowerMsg.includes('redirect')
+    ) {
+      setAuthError(
+        'রিডাইরেক্ট স্টেটজনিত সমস্যা হয়েছে। অনুগ্রহ করে পপআপ লগইন ব্যবহার করে আবার চেষ্টা করুন।'
+      );
+    } else if (code === 'auth/operation-not-supported-in-this-environment') {
+      setAuthError(
+        'এই পরিবেশে পপআপ লগইন সমর্থিত নয়। অনুগ্রহ করে মূল ব্রাউজারে খুলুন অথবা নাম্বার দিয়ে লগইন করুন।'
+      );
     } else if (code === 'auth/network-request-failed') {
       setAuthError('ইন্টারনেট সংযোগে সমস্যা। নেটওয়ার্ক পরীক্ষা করে আবার চেষ্টা করুন।');
     } else if (code === 'auth/unauthorized-domain') {
@@ -539,41 +564,20 @@ function AppContent() {
       );
     } else {
       setAuthError(
-        err instanceof Error
-          ? `Google লগইন ব্যর্থ হয়েছে: ${err.message}`
+        rawMsg
+          ? `Google লগইন ব্যর্থ হয়েছে: ${rawMsg}`
           : 'Google দিয়ে লগইন করা যায়নি। আবার চেষ্টা করুন।'
       );
     }
   }, []);
 
-  // Listen to Firebase Auth state & resolve any standalone redirect sign-in on mount
+  // Listen to Firebase Auth state cleanly (popup-only flow; no getRedirectResult/sessionStorage dependency)
   useEffect(() => {
-    const hasPendingRedirect = (() => {
-      try {
-        return sessionStorage.getItem('noor_elahi_redirect_pending') === '1';
-      } catch {
-        return false;
-      }
-    })();
-
-    if (hasPendingRedirect) {
-      setAuthLoading(true);
+    try {
+      sessionStorage.removeItem('noor_elahi_redirect_pending');
+    } catch {
+      // Ignore inaccessible sessionStorage
     }
-
-    getRedirectResult(auth)
-      .catch((err: unknown) => {
-        applyGoogleAuthError(err);
-      })
-      .finally(() => {
-        try {
-          sessionStorage.removeItem('noor_elahi_redirect_pending');
-        } catch {
-          // Ignore storage error
-        }
-        if (hasPendingRedirect) {
-          setAuthLoading(false);
-        }
-      });
 
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
@@ -1022,48 +1026,10 @@ function AppContent() {
       try {
         localStorage.setItem('noor_elahi_pending_google_prefill', JSON.stringify(prefill));
       } catch {
-        // Ignore storage error before popup
+        // Non-fatal if localStorage is restricted; popup auth can still proceed
       }
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
-      const code = (err as { code?: string } | null)?.code || '';
-      const isTopLevelWindow = (() => {
-        try {
-          return window.self === window.top;
-        } catch {
-          return false;
-        }
-      })();
-      const isStandalonePWA =
-        window.matchMedia('(display-mode: standalone)').matches ||
-        (window.navigator as unknown as { standalone?: boolean }).standalone === true;
-
-      if (
-        (code === 'auth/popup-blocked' ||
-          code === 'auth/operation-not-supported-in-this-environment' ||
-          code === 'auth/web-storage-unsupported' ||
-          code === 'auth/internal-error') &&
-        (isStandalonePWA || isTopLevelWindow)
-      ) {
-        try {
-          sessionStorage.setItem('noor_elahi_redirect_pending', '1');
-        } catch {
-          // Ignore storage error
-        }
-        try {
-          await signInWithRedirect(auth, googleProvider);
-          return;
-        } catch (redirErr) {
-          try {
-            sessionStorage.removeItem('noor_elahi_redirect_pending');
-          } catch {
-            // Ignore
-          }
-          applyGoogleAuthError(redirErr);
-          return;
-        }
-      }
-
       applyGoogleAuthError(err);
     } finally {
       setAuthLoading(false);
