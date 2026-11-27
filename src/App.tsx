@@ -542,11 +542,16 @@ function AppContent() {
     if (
       code === 'auth/cancelled-popup-request' ||
       code === 'auth/no-current-user' ||
+      code === 'USER_CANCELLED' ||
       lowerMsg.includes('user_cancelled') ||
       lowerMsg.includes('user cancelled') ||
+      lowerMsg.includes('cancelled by user') ||
+      lowerMsg.includes('canceled by user') ||
       lowerMsg.includes('getcredentialcancellationexception')
     ) {
-      setAuthError('Google সাইন-ইন বাতিল করা হয়েছে। আবার চেষ্টা করুন।');
+      setAuthError(
+        'Google সাইন-ইন বাতিল হয়েছে বা পপআপ বন্ধ হয়ে গেছে। আবার চেষ্টা করুন (APK-তে বারবার এমন হলে Firebase Console-এ SHA-1 যোগ করা আছে কিনা দেখুন)।'
+      );
       return;
     }
 
@@ -559,6 +564,8 @@ function AppContent() {
       );
     } else if (
       lowerMsg.includes('28444') ||
+      lowerMsg.includes('28404') ||
+      lowerMsg.includes('google cloud oauth is not configured') ||
       lowerMsg.includes('developer console is not set up') ||
       lowerMsg.includes('getcredentialcustomexception') ||
       lowerMsg.includes('missing_google_web_client_id') ||

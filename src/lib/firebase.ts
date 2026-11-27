@@ -106,7 +106,10 @@ export async function signInWithGoogleSmart(): Promise<UserCredential> {
     const res = await SocialLogin.login({
       provider: 'google',
       options: {
-        style: 'standard',
+        style: 'bottom',
+        filterByAuthorizedAccounts: false,
+        autoSelectEnabled: false,
+        forcePrompt: true,
       },
     });
     const googleResult = res?.result;
