@@ -40,6 +40,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -760,6 +763,134 @@ public class NoorStoragePlugin extends Plugin {
         });
     }
 
+    private String resolveDirectPathFromContentUri(ContentResolver resolver, Uri uri) {
+        try (Cursor c = resolver.query(uri, new String[] { MediaStore.MediaColumns.DATA }, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) {
+                String path = c.getString(0);
+                if (path != null && !path.trim().isEmpty()) {
+                    return path.trim();
+                }
+            }
+        } catch (Throwable ignored) {
+            // DATA column may be restricted or unavailable
+        }
+        return null;
+    }
+
+    private String shortSha256Hex(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < Math.min(12, digest.length); i++) {
+                sb.append(String.format(Locale.ROOT, "%02x", digest[i]));
+            }
+            return sb.toString();
+        } catch (Throwable e) {
+            return String.valueOf(Math.abs(input.hashCode()));
+        }
+    }
+
+    private void pruneVideoCacheIfNeeded(File cacheDir, long maxBytes) {
+        File[] files = cacheDir.listFiles();
+        if (files == null || files.length == 0) return;
+        long total = 0L;
+        for (File f : files) {
+            total += f.length();
+        }
+        if (total <= maxBytes) return;
+        Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+        for (File f : files) {
+            if (total <= maxBytes) break;
+            long len = f.length();
+            if (f.delete()) {
+                total -= len;
+            }
+        }
+    }
+
+    @PluginMethod
+    public void resolvePlayableVideoUri(PluginCall call) {
+        String uriStr = call.getString("uri");
+        if (uriStr == null || uriStr.trim().isEmpty()) {
+            call.reject("uri is required");
+            return;
+        }
+        Context ctx = getContext();
+        if (ctx == null) {
+            call.resolve(new JSObject().put("uri", uriStr.trim()));
+            return;
+        }
+        executor.execute(() -> {
+            String trimmed = uriStr.trim();
+            try {
+                Uri uri = Uri.parse(trimmed);
+                if ("file".equalsIgnoreCase(uri.getScheme()) && uri.getPath() != null) {
+                    File direct = new File(uri.getPath());
+                    if (direct.exists() && direct.canRead() && direct.length() > 0) {
+                        call.resolve(new JSObject().put("uri", Uri.fromFile(direct).toString()).put("cached", false));
+                        return;
+                    }
+                }
+
+                if ("content".equalsIgnoreCase(uri.getScheme())) {
+                    ContentResolver resolver = ctx.getContentResolver();
+                    String directPath = resolveDirectPathFromContentUri(resolver, uri);
+                    if (directPath != null) {
+                        File directFile = new File(directPath);
+                        if (directFile.exists() && directFile.canRead() && directFile.length() > 0) {
+                            call.resolve(new JSObject().put("uri", Uri.fromFile(directFile).toString()).put("cached", false));
+                            return;
+                        }
+                    }
+
+                    // Copy/cache Scoped-Storage content:// video into app cacheDir so WebView <video> supports HTTP 206 seeking
+                    long openableSize = queryOpenableSize(resolver, uri);
+                    File cacheDir = new File(ctx.getCacheDir(), "noor_video_cache");
+                    if (!cacheDir.exists()) {
+                        //noinspection ResultOfMethodCallIgnored
+                        cacheDir.mkdirs();
+                    }
+                    File cachedFile = new File(cacheDir, shortSha256Hex(trimmed) + ".mp4");
+                    if (cachedFile.exists() && cachedFile.length() > 0 && (openableSize <= 0 || cachedFile.length() == openableSize)) {
+                        //noinspection ResultOfMethodCallIgnored
+                        cachedFile.setLastModified(System.currentTimeMillis());
+                        call.resolve(new JSObject().put("uri", Uri.fromFile(cachedFile).toString()).put("cached", true));
+                        return;
+                    }
+
+                    pruneVideoCacheIfNeeded(cacheDir, 420L * 1024L * 1024L);
+                    File tmpFile = new File(cacheDir, cachedFile.getName() + ".tmp");
+                    long copied = 0L;
+                    try (InputStream in = resolver.openInputStream(uri);
+                         OutputStream out = new FileOutputStream(tmpFile, false)) {
+                        if (in == null) {
+                            throw new IOException("Cannot open content stream");
+                        }
+                        byte[] buf = new byte[65536];
+                        int read;
+                        while ((read = in.read(buf)) != -1) {
+                            out.write(buf, 0, read);
+                            copied += read;
+                        }
+                        out.flush();
+                    }
+
+                    if (copied > 0 && tmpFile.renameTo(cachedFile)) {
+                        call.resolve(new JSObject().put("uri", Uri.fromFile(cachedFile).toString()).put("cached", true));
+                        return;
+                    } else if (tmpFile.exists()) {
+                        //noinspection ResultOfMethodCallIgnored
+                        tmpFile.delete();
+                    }
+                }
+            } catch (Throwable ignored) {
+                // Fall back to original URI
+            }
+            call.resolve(new JSObject().put("uri", trimmed).put("cached", false));
+        });
+    }
+
     private static final class ScannedEntry {
         String name;
         String uri;
@@ -821,7 +952,8 @@ public class NoorStoragePlugin extends Plugin {
             MediaStore.Downloads.DISPLAY_NAME,
             MediaStore.Downloads.SIZE,
             MediaStore.Downloads.MIME_TYPE,
-            MediaStore.Downloads.RELATIVE_PATH
+            MediaStore.Downloads.RELATIVE_PATH,
+            MediaStore.Downloads.DATA
         };
         try (Cursor c = resolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, null, null, null)) {
             if (c == null) return;
@@ -831,13 +963,27 @@ public class NoorStoragePlugin extends Plugin {
                 long size = c.getLong(2);
                 String mime = c.getString(3);
                 String rel = c.getString(4);
-                if (name == null || size <= 0) continue;
+                String dataPath = c.getString(5);
+                if ((name == null || name.trim().isEmpty()) && dataPath != null) {
+                    int slash = dataPath.lastIndexOf('/');
+                    name = slash >= 0 ? dataPath.substring(slash + 1) : dataPath;
+                }
+                if (name == null || name.trim().isEmpty()) continue;
                 String kind = detectKind(name, mime);
                 if (kind == null) continue;
+                Uri itemUri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, String.valueOf(id));
+                if (size <= 0) {
+                    size = queryOpenableSize(resolver, itemUri);
+                    if (size <= 0 && dataPath != null) {
+                        File f = new File(dataPath);
+                        if (f.exists()) size = f.length();
+                    }
+                }
+                if (!"pdf".equals(kind) && size <= 0) continue;
                 ScannedEntry entry = new ScannedEntry();
                 entry.name = name;
-                entry.uri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, String.valueOf(id)).toString();
-                entry.sizeBytes = size;
+                entry.uri = itemUri.toString();
+                entry.sizeBytes = Math.max(0L, size);
                 entry.kind = kind;
                 entry.folder = rel != null ? rel : "Download";
                 addDeduped(out, entry);
@@ -859,8 +1005,9 @@ public class NoorStoragePlugin extends Plugin {
         String selection =
             MediaStore.Files.FileColumns.MIME_TYPE + " = ? OR " +
             MediaStore.Files.FileColumns.MIME_TYPE + " LIKE ? OR " +
-            MediaStore.Files.FileColumns.DISPLAY_NAME + " LIKE ?";
-        String[] args = new String[] { "application/pdf", "video/%", "%.pdf" };
+            MediaStore.Files.FileColumns.DISPLAY_NAME + " LIKE ? OR " +
+            MediaStore.Files.FileColumns.DATA + " LIKE ?";
+        String[] args = new String[] { "application/pdf", "video/%", "%.pdf", "%.pdf" };
         try (Cursor c = resolver.query(filesUri, projection, selection, args, null)) {
             if (c == null) return;
             while (c.moveToNext()) {
@@ -873,13 +1020,22 @@ public class NoorStoragePlugin extends Plugin {
                     int slash = dataPath.lastIndexOf('/');
                     name = slash >= 0 ? dataPath.substring(slash + 1) : dataPath;
                 }
-                if (name == null || size <= 0) continue;
+                if (name == null || name.trim().isEmpty()) continue;
                 String kind = detectKind(name, mime);
                 if (kind == null) continue;
+                Uri itemUri = Uri.withAppendedPath(filesUri, String.valueOf(id));
+                if (size <= 0) {
+                    size = queryOpenableSize(resolver, itemUri);
+                    if (size <= 0 && dataPath != null) {
+                        File f = new File(dataPath);
+                        if (f.exists()) size = f.length();
+                    }
+                }
+                if (!"pdf".equals(kind) && size <= 0) continue;
                 ScannedEntry entry = new ScannedEntry();
                 entry.name = name;
-                entry.uri = Uri.withAppendedPath(filesUri, String.valueOf(id)).toString();
-                entry.sizeBytes = size;
+                entry.uri = itemUri.toString();
+                entry.sizeBytes = Math.max(0L, size);
                 entry.kind = kind;
                 entry.folder = dataPath != null ? dataPath : "MediaStore/Files";
                 addDeduped(out, entry);
@@ -953,25 +1109,40 @@ public class NoorStoragePlugin extends Plugin {
     }
 
     private void scanDirectDirectories(Map<String, ScannedEntry> out) {
+        Set<File> roots = new HashSet<>();
+        File pubDl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        if (pubDl != null) roots.add(pubDl);
+        File pubDoc = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS);
+        if (pubDoc != null) roots.add(pubDoc);
+
         File extRoot = Environment.getExternalStorageDirectory();
-        if (extRoot == null) return;
-        File[] roots = new File[] {
-            new File(extRoot, "Download/NoorElahi"),
-            new File(extRoot, "Download/NOOR ELAHI"),
-            new File(extRoot, "Download/Noor Elahi"),
-            new File(extRoot, "Download"),
-            new File(extRoot, "Downloads"),
-            new File(extRoot, "Documents/NoorElahi"),
-            new File(extRoot, "Documents"),
-            new File(extRoot, "Movies"),
-            new File(extRoot, "DCIM"),
-            new File(extRoot, "WhatsApp/Media/WhatsApp Documents"),
-            new File(extRoot, "WhatsApp/Media/WhatsApp Video"),
-            new File(extRoot, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents"),
-            new File(extRoot, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video")
-        };
+        if (extRoot != null) {
+            File[] candidates = new File[] {
+                new File(extRoot, "Download/NoorElahi"),
+                new File(extRoot, "Download/NOOR ELAHI"),
+                new File(extRoot, "Download/Noor Elahi"),
+                new File(extRoot, "Download/Telegram"),
+                new File(extRoot, "Download"),
+                new File(extRoot, "Downloads"),
+                new File(extRoot, "Documents/NoorElahi"),
+                new File(extRoot, "Documents"),
+                new File(extRoot, "Movies"),
+                new File(extRoot, "DCIM"),
+                new File(extRoot, "Telegram/Telegram Documents"),
+                new File(extRoot, "Telegram/Telegram Video"),
+                new File(extRoot, "Android/media/org.telegram.messenger/Telegram/Telegram Documents"),
+                new File(extRoot, "Android/media/org.telegram.messenger/Telegram/Telegram Video"),
+                new File(extRoot, "WhatsApp/Media/WhatsApp Documents"),
+                new File(extRoot, "WhatsApp/Media/WhatsApp Documents/Sent"),
+                new File(extRoot, "WhatsApp/Media/WhatsApp Video"),
+                new File(extRoot, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents"),
+                new File(extRoot, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents/Sent"),
+                new File(extRoot, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video")
+            };
+            roots.addAll(Arrays.asList(candidates));
+        }
         for (File dir : roots) {
-            scanDirectFolderRecursive(dir, 0, 4, out);
+            scanDirectFolderRecursive(dir, 0, 5, out);
         }
     }
 

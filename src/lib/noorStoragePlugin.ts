@@ -52,6 +52,7 @@ interface NoorStorageNativePlugin {
   }>;
   scanPublicFiles(): Promise<{ files: NoorScannedFileItem[]; count: number }>;
   readUriBase64(options: { uri: string }): Promise<{ data: string; sizeBytes: number }>;
+  resolvePlayableVideoUri(options: { uri: string }): Promise<{ uri: string; cached?: boolean }>;
   addListener(
     eventName: 'noorDownloadProgress',
     listenerFunc: (event: NoorDownloadProgressEvent) => void
@@ -225,5 +226,15 @@ export async function readNativeUriAsBlob(
     return new Blob([bytes], { type: mimeType });
   } catch {
     return null;
+  }
+}
+
+export async function resolveNativePlayableVideoUri(uri: string): Promise<string> {
+  if (!isAndroidNative() || !uri) return uri;
+  try {
+    const res = await NoorStorage.resolvePlayableVideoUri({ uri });
+    return res?.uri || uri;
+  } catch {
+    return uri;
   }
 }

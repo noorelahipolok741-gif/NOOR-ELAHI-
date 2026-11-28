@@ -34,7 +34,7 @@ import {
 import {
   downloadRemoteFileToCapacitorPublicStorage,
   isNativeConvertedOrFileUrl,
-  toPlayableNativeSrc,
+  prepareNativePlayableVideoSrc,
 } from '../lib/capacitorScanner';
 import { isNoorNativeStorageAvailable } from '../lib/noorStoragePlugin';
 import { apiUrl } from '../lib/api';
@@ -95,12 +95,24 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   onClose,
 }) => {
   const containerWrapRef = useRef<HTMLDivElement | null>(null);
+  const plyrHostRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const plyrRef = useRef<Plyr | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const lastTapRef = useRef<{ time: number; side: 'left' | 'right' } | null>(null);
   const singleTapTimerRef = useRef<number | null>(null);
   const fallbackHandlerRef = useRef<(() => void) | null>(null);
+
+  const localVideoUriRef = useRef(localVideoUri);
+  localVideoUriRef.current = localVideoUri;
+  const isOnlineRef = useRef(isOnline);
+  isOnlineRef.current = isOnline;
+  const initialPositionRef = useRef(initialPosition);
+  initialPositionRef.current = initialPosition;
+  const onSaveProgressRef = useRef(onSaveProgress);
+  onSaveProgressRef.current = onSaveProgress;
+  const onOfflineCachedRef = useRef(onOfflineCached);
+  onOfflineCachedRef.current = onOfflineCached;
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [overlayVisible, setOverlayVisible] = useState(true);
@@ -116,8 +128,8 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
   const [saveNotice, setSaveNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    setOfflineSaved(hasOfflineVideo);
-  }, [hasOfflineVideo, itemId]);
+    setOfflineSaved(Boolean(hasOfflineVideo || localVideoUri));
+  }, [hasOfflineVideo, localVideoUri, itemId]);
 
   // Block Plyr's synthetic CustomEvent('error', { bubbles: true }) from bubbling to window
   useEffect(() => {
@@ -138,24 +150,62 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
     let progressInterval: number | null = null;
     fallbackHandlerRef.current = null;
 
+    const cleanupActivePlayer = () => {
+      if (progressInterval) {
+        clearInterval(progressInterval);
+        progressInterval = null;
+      }
+      if (hlsRef.current) {
+        try {
+          hlsRef.current.destroy();
+        } catch {
+          // Ignore HLS cleanup error
+        }
+        hlsRef.current = null;
+      }
+      if (plyrRef.current) {
+        try {
+          plyrRef.current.destroy();
+        } catch {
+          // Ignore Plyr cleanup error
+        }
+        plyrRef.current = null;
+      }
+      if (videoRef.current) {
+        try {
+          videoRef.current.pause();
+          videoRef.current.removeAttribute('src');
+          videoRef.current.load();
+        } catch {
+          // Ignore video cleanup error
+        }
+        videoRef.current = null;
+      }
+      if (plyrHostRef.current) {
+        plyrHostRef.current.innerHTML = '';
+      }
+    };
+
     async function initPlayer() {
       setIsBuffering(true);
       setPlayerError(null);
       setEmbedUrl(null);
+      cleanupActivePlayer();
 
       let sourceUrl = '';
       let usingOfflineLocal = false;
 
-      if (localVideoUri) {
-        const converted = toPlayableNativeSrc(localVideoUri);
-        if (converted) {
+      const initialLocalUri = localVideoUriRef.current;
+      if (initialLocalUri) {
+        const converted = await prepareNativePlayableVideoSrc(initialLocalUri);
+        if (converted && !cancelled) {
           sourceUrl = converted;
           usingOfflineLocal = true;
           setOfflineSaved(true);
         }
       }
 
-      if (!usingOfflineLocal) {
+      if (!usingOfflineLocal && !cancelled) {
         try {
           const offline = await getOfflineMedia(itemId);
           if (offline?.videoBlob && offline.videoBlob.size > 0 && !cancelled) {
@@ -163,7 +213,7 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
             sourceUrl = objectUrl;
             usingOfflineLocal = true;
             setOfflineSaved(true);
-            onOfflineCached?.({
+            onOfflineCachedRef.current?.({
               itemId,
               fileSizeBytes: offline.fileSizeBytes || offline.videoBlob.size,
               hasLocalVideo: true,
@@ -204,8 +254,8 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
         sourceUrl = resolveStreamUrl(cleanRaw, 'video');
       }
 
-      const videoEl = videoRef.current;
-      if (!videoEl || cancelled) return;
+      const hostEl = plyrHostRef.current;
+      if (!hostEl || cancelled) return;
 
       if (!sourceUrl) {
         setIsBuffering(false);
@@ -213,23 +263,26 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
         return;
       }
 
-      const cleanupActivePlayer = () => {
-        if (progressInterval) {
-          clearInterval(progressInterval);
-          progressInterval = null;
+      const createFreshVideoElement = (): HTMLVideoElement => {
+        if (plyrHostRef.current) {
+          plyrHostRef.current.innerHTML = '';
         }
-        if (hlsRef.current) {
-          hlsRef.current.destroy();
-          hlsRef.current = null;
-        }
-        if (plyrRef.current) {
-          plyrRef.current.destroy();
-          plyrRef.current = null;
-        }
-        if (videoRef.current) {
-          videoRef.current.removeAttribute('src');
-        }
+        const el = document.createElement('video');
+        el.playsInline = true;
+        el.setAttribute('playsinline', 'true');
+        el.preload = 'metadata';
+        el.className = 'w-full aspect-video';
+        el.addEventListener('error', (e) => {
+          e.stopPropagation();
+          if (!el.getAttribute('src')) return;
+          fallbackHandlerRef.current?.();
+        });
+        hostEl.appendChild(el);
+        videoRef.current = el;
+        return el;
       };
+
+      let videoEl = createFreshVideoElement();
 
       const setupPlyrInstance = (qualityOptions?: {
         default: number;
@@ -238,8 +291,16 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
         onChange?: (newQuality: number) => void;
       }) => {
         if (plyrRef.current) {
-          plyrRef.current.destroy();
+          try {
+            plyrRef.current.destroy();
+          } catch {
+            // Ignore destroy error
+          }
           plyrRef.current = null;
+        }
+
+        if (!videoEl.isConnected) {
+          videoEl = createFreshVideoElement();
         }
 
         const player = new Plyr(videoEl, {
@@ -281,8 +342,9 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
           if (videoEl.duration && Number.isFinite(videoEl.duration)) {
             setDetectedDuration(videoEl.duration);
             try {
-              if (initialPosition > 2 && initialPosition < videoEl.duration - 2) {
-                videoEl.currentTime = initialPosition;
+              const startPos = initialPositionRef.current;
+              if (startPos > 2 && startPos < videoEl.duration - 2) {
+                videoEl.currentTime = startPos;
               }
             } catch {
               // Ignore seek failure
@@ -313,12 +375,12 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
         player.on('pause', () => {
           setIsPlaying(false);
           setOverlayVisible(true);
-          onSaveProgress(itemId, videoEl.currentTime || 0, videoEl.duration || 0);
+          onSaveProgressRef.current(itemId, videoEl.currentTime || 0, videoEl.duration || 0);
         });
         player.on('ended', () => {
           setIsPlaying(false);
           setOverlayVisible(true);
-          onSaveProgress(itemId, videoEl.duration || 0, videoEl.duration || 0);
+          onSaveProgressRef.current(itemId, videoEl.duration || 0, videoEl.duration || 0);
         });
         player.on('error', () => {
           if (!videoEl.getAttribute('src') && !hlsRef.current) return;
@@ -328,7 +390,7 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
         if (progressInterval) clearInterval(progressInterval);
         progressInterval = window.setInterval(() => {
           if (videoEl && !videoEl.paused && videoEl.currentTime > 0) {
-            onSaveProgress(itemId, videoEl.currentTime, videoEl.duration || 0);
+            onSaveProgressRef.current(itemId, videoEl.currentTime, videoEl.duration || 0);
           }
         }, 3000);
       };
@@ -401,19 +463,24 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
       const triggerSmartResolutionOrError = async () => {
         if (cancelled) return;
         if (usingOfflineLocal || isNativeConvertedOrFileUrl(sourceUrl)) {
-          // If online and a Drive preview fallback exists, fall back cleanly when local file was removed
+          // If online, fall back cleanly to online Drive preview or remote stream
           const driveId = getGoogleDriveFileId(videoUrl);
-          if (isOnline && driveId) {
+          if (isOnlineRef.current && driveId) {
             cleanupActivePlayer();
             setEmbedUrl(`https://drive.google.com/file/d/${driveId}/preview`);
             setIsBuffering(false);
             setPlayerError(null);
             return;
           }
-          setIsBuffering(false);
-          setIsPlaying(false);
-          setPlayerError('ফোনের Download ফোল্ডার থেকে অফলাইন ভিডিও ফাইলটি প্লে করা যায়নি।');
-          return;
+          if (isOnlineRef.current && videoUrl) {
+            usingOfflineLocal = false;
+            sourceUrl = resolveStreamUrl(videoUrl, 'video');
+          } else {
+            setIsBuffering(false);
+            setIsPlaying(false);
+            setPlayerError('ফোনের Download ফোল্ডার থেকে অফলাইন ভিডিও ফাইলটি প্লে করা যায়নি।');
+            return;
+          }
         }
         if (resolvedAttempted) {
           setIsBuffering(false);
@@ -506,33 +573,22 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
     return () => {
       cancelled = true;
       fallbackHandlerRef.current = null;
-      if (progressInterval) clearInterval(progressInterval);
       if (singleTapTimerRef.current) {
         clearTimeout(singleTapTimerRef.current);
       }
       if (videoRef.current && videoRef.current.currentTime > 0) {
-        onSaveProgress(
+        onSaveProgressRef.current(
           itemId,
           videoRef.current.currentTime,
           videoRef.current.duration || 0
         );
       }
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
-      if (plyrRef.current) {
-        plyrRef.current.destroy();
-        plyrRef.current = null;
-      }
-      if (videoRef.current) {
-        videoRef.current.removeAttribute('src');
-      }
+      cleanupActivePlayer();
       if (objectUrl) {
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [itemId, videoUrl, localVideoUri, reloadKey]);
+  }, [itemId, videoUrl, reloadKey]);
 
   const togglePlayPause = () => {
     const player = plyrRef.current;
@@ -780,7 +836,7 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
           ref={containerWrapRef}
           className="relative rounded-2xl overflow-hidden bg-black border border-slate-800 shadow-2xl"
         >
-          {embedUrl ? (
+          {embedUrl && (
             <div className="relative w-full h-[320px] sm:h-[480px] md:h-[550px] max-h-[76dvh] bg-black pb-2">
               <iframe
                 src={embedUrl}
@@ -791,25 +847,17 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
                 referrerPolicy="no-referrer-when-downgrade"
               />
             </div>
-          ) : (
-            <>
-              <video
-                ref={videoRef}
-                playsInline
-                preload="metadata"
-                onError={(e) => {
-                  e.stopPropagation();
-                  if (!e.currentTarget.getAttribute('src')) return;
-                  fallbackHandlerRef.current?.();
-                }}
-                className="w-full aspect-video"
-              />
+          )}
 
-              {/* Interactive Double-Tap & Floating Overlay Layer */}
-              <div
-                onClick={handleSurfaceInteraction}
-                className="absolute inset-x-0 top-0 bottom-12 z-20 flex flex-col justify-between cursor-pointer"
-              >
+          {/* Isolated host so Plyr's DOM wrapping never conflicts with React reconciler */}
+          <div className={embedUrl ? 'hidden' : 'relative w-full'}>
+            <div ref={plyrHostRef} className="w-full" />
+
+            {/* Interactive Double-Tap & Floating Overlay Layer */}
+            <div
+              onClick={handleSurfaceInteraction}
+              className="absolute inset-x-0 top-0 bottom-12 z-20 flex flex-col justify-between cursor-pointer"
+            >
                 <div
                   className={`px-4 py-3 bg-gradient-to-b from-black/80 via-black/40 to-transparent transition-opacity duration-200 ${
                     overlayVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
@@ -889,8 +937,7 @@ export const PlyrVideoPlayer: React.FC<PlyrVideoPlayerProps> = ({
 
                 <div className="h-4" />
               </div>
-            </>
-          )}
+          </div>
         </div>
 
         {/* Video Info & Action Controls Below Player */}

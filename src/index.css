@@ -194,11 +194,42 @@
   will-change: transform, opacity;
 }
 
+@keyframes rgbConicSpin {
+  0% {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  100% {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+.rgb-running-border-spinner {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 220%;
+  aspect-ratio: 1 / 1;
+  background: conic-gradient(
+    from 0deg,
+    #4285f4 0deg,
+    #06b6d4 55deg,
+    #34a853 115deg,
+    #fbbc05 175deg,
+    #f97316 230deg,
+    #ea4335 285deg,
+    #ec4899 325deg,
+    #4285f4 360deg
+  );
+  animation: rgbConicSpin 4.5s linear infinite;
+  will-change: transform;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .rgb-orb-blue,
   .rgb-orb-red,
   .rgb-orb-yellow,
-  .rgb-orb-green {
+  .rgb-orb-green,
+  .rgb-running-border-spinner {
     animation: none;
   }
 }

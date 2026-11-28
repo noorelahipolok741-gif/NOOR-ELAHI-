@@ -196,233 +196,247 @@ export const AuthSuitcaseScreen: React.FC<AuthSuitcaseScreenProps> = ({
             </div>
           )}
 
-          {/* Brand Header */}
+          {/* Colorful Brand Header */}
           <div className="text-center space-y-2">
             <div className="relative inline-flex items-center justify-center">
-              <div className="w-16 h-16 rounded-2xl bg-white/95 border border-white/20 shadow-[0_12px_36px_rgba(66,133,244,0.28)] overflow-hidden">
-                <img src="/icon-192.png" alt="NOOR ELAHI" className="w-full h-full object-contain" />
+              <div className="p-[2px] rounded-2xl bg-gradient-to-tr from-[#4285F4] via-[#EC4899] to-[#34A853] shadow-[0_10px_36px_rgba(6,182,212,0.35)]">
+                <div className="w-16 h-16 rounded-[14px] bg-white/95 overflow-hidden">
+                  <img src="/icon-192.png" alt="NOOR ELAHI" className="w-full h-full object-contain" />
+                </div>
               </div>
             </div>
             <div className="space-y-0.5">
-              <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
+              <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight bg-gradient-to-r from-cyan-300 via-emerald-300 to-fuchsia-400 bg-clip-text text-transparent">
                 NOOR ELAHI
               </h1>
-              <p className="text-xs sm:text-sm text-slate-300/85">
+              <p className="text-xs sm:text-sm font-medium text-cyan-200/85">
                 স্মার্ট ডিজিটাল লার্নিং প্ল্যাটফর্ম
               </p>
             </div>
           </div>
 
-          {/* Sleek Dark Glass Auth Card */}
-          <div className="relative rounded-3xl bg-slate-950/75 backdrop-blur-2xl border border-white/12 shadow-[0_24px_70px_rgba(2,6,23,0.85)] overflow-hidden">
-            {/* Subtle top Google RGB hairline accent */}
+          {/* Colorful Dark Glass Auth Card with Continuous Running RGB Border */}
+          <div className="relative">
+            {/* Soft Blurred Outer Running RGB Halo */}
             <div
-              className="h-[2px] w-full"
-              style={{
-                background:
-                  'linear-gradient(90deg, #4285F4 0%, #EA4335 33%, #FBBC05 66%, #34A853 100%)',
-              }}
-            />
+              aria-hidden="true"
+              className="pointer-events-none absolute -inset-[3px] rounded-[28px] overflow-hidden blur-md opacity-70"
+            >
+              <div className="rgb-running-border-spinner" />
+            </div>
 
-            <div className="p-5 sm:p-6 space-y-4">
-              {/* Profile Photo & Name Setup Row */}
-              <div className="flex items-center gap-3.5">
-                <label className="relative w-16 h-16 rounded-2xl bg-slate-900/90 border border-white/12 hover:border-[#4285F4]/70 flex items-center justify-center cursor-pointer overflow-hidden shrink-0 transition">
-                  {photoUrl ? (
-                    <img src={photoUrl} alt="প্রোফাইল ছবি" className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="flex flex-col items-center gap-1 text-slate-400">
-                      <Camera className="w-5 h-5 text-[#4285F4]" />
-                      <span className="text-[10px] font-medium">ছবি</span>
+            {/* Crisp Running RGB Border Frame */}
+            <div className="relative rounded-[26px] p-[2.5px] overflow-hidden shadow-[0_24px_75px_rgba(2,6,23,0.9)]">
+              <div aria-hidden="true" className="rgb-running-border-spinner" />
+
+              <div className="relative z-10 rounded-[23.5px] bg-[#070d1f]/95 backdrop-blur-2xl overflow-hidden">
+                {/* Inner Subtle Colorful Ambient Tint */}
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/[0.07] via-emerald-500/[0.04] to-fuchsia-500/[0.07]"
+                />
+
+                <div className="relative p-5 sm:p-6 space-y-4">
+                  {/* Profile Photo & Name Setup Row */}
+                  <div className="flex items-center gap-3.5">
+                    <label className="relative w-16 h-16 rounded-2xl bg-gradient-to-br from-cyan-500/15 via-blue-500/10 to-purple-500/15 border border-cyan-400/45 hover:border-emerald-400 flex items-center justify-center cursor-pointer overflow-hidden shrink-0 transition shadow-inner">
+                      {photoUrl ? (
+                        <img src={photoUrl} alt="প্রোফাইল ছবি" className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="flex flex-col items-center gap-1 text-cyan-200">
+                          <Camera className="w-5 h-5 text-cyan-400" />
+                          <span className="text-[10px] font-semibold">ছবি</span>
+                        </div>
+                      )}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handlePhotoPick}
+                        className="hidden"
+                      />
+                    </label>
+
+                    <div className="flex-1 space-y-1.5 min-w-0">
+                      <div className="relative">
+                        <User className="w-4 h-4 text-cyan-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={name}
+                          onChange={(e) => {
+                            setName(e.target.value);
+                            setProfileSaved(false);
+                            setFormHintError('');
+                          }}
+                          placeholder="আপনার নাম লিখুন"
+                          className="w-full h-11 pl-10 pr-3 rounded-xl bg-slate-900/85 border border-cyan-400/25 focus:border-cyan-400 text-sm text-white placeholder:text-slate-400 outline-none transition"
+                        />
+                      </div>
+                      <p className="text-[11px] text-sky-200/80 pl-0.5 truncate">
+                        নাম ও ছবি আপনার প্রোফাইলে প্রদর্শিত হবে
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Password Field + Required Warning Caption */}
+                  <div className="space-y-1.5">
+                    <div className="relative">
+                      <Lock className="w-4 h-4 text-emerald-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type={showPassword ? 'text' : 'password'}
+                        value={password}
+                        onChange={(e) => {
+                          setPassword(e.target.value);
+                          setProfileSaved(false);
+                          setFormHintError('');
+                        }}
+                        placeholder="পাসওয়ার্ড লিখুন"
+                        autoComplete="current-password"
+                        className="w-full h-11 pl-10 pr-11 rounded-xl bg-slate-900/85 border border-emerald-400/25 focus:border-emerald-400 text-sm text-white placeholder:text-slate-400 outline-none transition"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((v) => !v)}
+                        aria-label={showPassword ? 'পাসওয়ার্ড লুকান' : 'পাসওয়ার্ড দেখুন'}
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 w-9 h-9 rounded-lg flex items-center justify-center text-slate-300 hover:text-cyan-300 transition"
+                      >
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    <p className="text-[11px] font-medium text-amber-300 pl-1">
+                      পাসওয়ার্ডটি গোপন রাখুন
+                    </p>
+                  </div>
+
+                  {/* Save Setup Button */}
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={handleSaveProfileSetup}
+                      className={`w-full h-11 rounded-2xl border font-bold text-sm flex items-center justify-center gap-2 transition active:scale-[0.98] ${
+                        profileSaved
+                          ? 'bg-gradient-to-r from-emerald-500/30 to-teal-500/25 border-emerald-400/70 text-emerald-200 shadow-lg shadow-emerald-500/15'
+                          : 'bg-gradient-to-r from-emerald-500/20 via-cyan-500/20 to-blue-500/20 hover:from-emerald-500/30 hover:to-blue-500/30 border-cyan-400/45 text-cyan-100'
+                      }`}
+                    >
+                      <Check className={`w-4 h-4 shrink-0 ${profileSaved ? 'text-emerald-300' : 'text-cyan-300'}`} />
+                      <span>{profileSaved ? 'তথ্য সেভ হয়েছে · এবার নিচে লগইন করুন' : 'সেভ করুন'}</span>
+                    </button>
+
+                    {formHintError && (
+                      <p className="text-xs text-rose-300 text-center">{formHintError}</p>
+                    )}
+
+                    <div className="rounded-2xl bg-gradient-to-br from-amber-500/12 via-orange-500/10 to-rose-500/10 border border-amber-400/35 px-3.5 py-2.5 text-[11px] text-amber-100 leading-relaxed">
+                      সতর্কতা: আপনি যে নাম, পাসওয়ার্ড এবং জিমেইল (Google অ্যাকাউন্ট) বা নাম্বার ব্যবহার করছেন, পরবর্তীতে ঠিক সেই একই তথ্য দিয়ে লগইন না করলে আপনার প্রোফাইল ও অ্যাপের সংরক্ষিত কোনো ডেটা ফিরে আসবে না। পাসওয়ার্ড অনেকের একরকম হতে পারে, কিন্তু নাম ও জিমেইল আলাদা থাকে।
+                    </div>
+                  </div>
+
+                  {/* Mobile Number Field when Sign in with Number is active */}
+                  <AnimatePresence>
+                    {showNumberForm && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="overflow-hidden space-y-3"
+                      >
+                        <div className="relative">
+                          <Phone className="w-4 h-4 text-sky-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="tel"
+                            value={phone}
+                            onChange={(e) => setPhone(e.target.value)}
+                            placeholder="মোবাইল নাম্বার (যেমন: 017XXXXXXXX)"
+                            autoComplete="tel"
+                            className="w-full h-11 pl-10 pr-3 rounded-xl bg-slate-900/90 border border-[#4285F4]/55 focus:border-cyan-400 text-sm text-white placeholder:text-slate-400 outline-none transition"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          disabled={authLoading}
+                          onClick={() => {
+                            persistHint();
+                            onNumberLogin({ phone, password, name, photoUrl });
+                          }}
+                          className="w-full h-12 rounded-2xl bg-gradient-to-r from-[#4285F4] via-cyan-500 to-emerald-500 text-white font-bold text-sm shadow-lg shadow-cyan-500/25 active:scale-[0.98] transition disabled:opacity-60"
+                        >
+                          {authLoading ? 'প্রবেশ করা হচ্ছে...' : 'নাম্বার দিয়ে প্রবেশ করুন'}
+                        </button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {authError && (
+                    <div className="rounded-xl bg-rose-500/15 border border-rose-500/45 px-3.5 py-2.5 text-xs text-rose-200 space-y-2">
+                      <p className="leading-relaxed">{authError}</p>
+                      {unauthorizedDomain && (
+                        <div className="rounded-lg bg-slate-950/90 border border-slate-800 p-2.5 space-y-2 text-[11px] text-slate-300">
+                          <div className="flex items-center justify-between gap-2">
+                            <code className="font-mono-num text-emerald-300 truncate">
+                              {unauthorizedDomain}
+                            </code>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard?.writeText(unauthorizedDomain).then(() => {
+                                  setCopiedDomain(true);
+                                  window.setTimeout(() => setCopiedDomain(false), 2000);
+                                }).catch(() => {});
+                              }}
+                              className="shrink-0 inline-flex items-center gap-1 rounded-md bg-emerald-500/15 border border-emerald-500/30 px-2 py-1 text-[10px] font-semibold text-emerald-300"
+                            >
+                              {copiedDomain ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                              <span>{copiedDomain ? 'কপি হয়েছে' : 'কপি'}</span>
+                            </button>
+                          </div>
+                          <p className="text-slate-400 leading-relaxed">
+                            Firebase Console → Authentication → Settings → Authorized domains এ এই ডোমেইনটি যোগ করলে পুনরায় আপডেট ছাড়াই Google লগইন চালু হবে।
+                          </p>
+                        </div>
+                      )}
                     </div>
                   )}
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={handlePhotoPick}
-                    className="hidden"
-                  />
-                </label>
 
-                <div className="flex-1 space-y-1.5 min-w-0">
-                  <div className="relative">
-                    <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                    <input
-                      type="text"
-                      value={name}
-                      onChange={(e) => {
-                        setName(e.target.value);
-                        setProfileSaved(false);
-                        setFormHintError('');
-                      }}
-                      placeholder="আপনার নাম লিখুন"
-                      className="w-full h-11 pl-10 pr-3 rounded-xl bg-slate-900/80 border border-white/10 focus:border-[#4285F4]/80 text-sm text-white placeholder:text-slate-500 outline-none transition"
-                    />
-                  </div>
-                  <p className="text-[11px] text-slate-400 pl-0.5 truncate">
-                    নাম ও ছবি আপনার প্রোফাইলে প্রদর্শিত হবে
-                  </p>
-                </div>
-              </div>
-
-              {/* Password Field + Required Warning Caption */}
-              <div className="space-y-1.5">
-                <div className="relative">
-                  <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={password}
-                    onChange={(e) => {
-                      setPassword(e.target.value);
-                      setProfileSaved(false);
-                      setFormHintError('');
-                    }}
-                    placeholder="পাসওয়ার্ড লিখুন"
-                    autoComplete="current-password"
-                    className="w-full h-11 pl-10 pr-11 rounded-xl bg-slate-900/80 border border-white/10 focus:border-[#34A853]/80 text-sm text-white placeholder:text-slate-500 outline-none transition"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? 'পাসওয়ার্ড লুকান' : 'পাসওয়ার্ড দেখুন'}
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 w-9 h-9 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-200 transition"
-                  >
-                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-                <p className="text-[11px] text-amber-300/90 pl-1">
-                  পাসওয়ার্ডটি গোপন রাখুন
-                </p>
-              </div>
-
-              {/* Save Setup Button */}
-              <div className="space-y-2">
-                <button
-                  type="button"
-                  onClick={handleSaveProfileSetup}
-                  className={`w-full h-11 rounded-2xl border font-bold text-sm flex items-center justify-center gap-2 transition active:scale-[0.98] ${
-                    profileSaved
-                      ? 'bg-[#34A853]/18 border-[#34A853]/50 text-emerald-300'
-                      : 'bg-white/[0.05] hover:bg-white/[0.09] border-white/14 text-slate-100'
-                  }`}
-                >
-                  <Check className={`w-4 h-4 shrink-0 ${profileSaved ? 'text-[#34A853]' : 'text-emerald-400'}`} />
-                  <span>{profileSaved ? 'তথ্য সেভ হয়েছে · এবার নিচে লগইন করুন' : 'সেভ করুন'}</span>
-                </button>
-
-                {formHintError && (
-                  <p className="text-xs text-rose-300 text-center">{formHintError}</p>
-                )}
-
-                <div className="rounded-2xl bg-amber-500/[0.08] border border-amber-400/20 px-3.5 py-2.5 text-[11px] text-amber-100/90 leading-relaxed">
-                  সতর্কতা: আপনি যে নাম, পাসওয়ার্ড এবং জিমেইল (Google অ্যাকাউন্ট) বা নাম্বার ব্যবহার করছেন, পরবর্তীতে ঠিক সেই একই তথ্য দিয়ে লগইন না করলে আপনার প্রোফাইল ও অ্যাপের সংরক্ষিত কোনো ডেটা ফিরে আসবে না। পাসওয়ার্ড অনেকের একরকম হতে পারে, কিন্তু নাম ও জিমেইল আলাদা থাকে।
-                </div>
-              </div>
-
-              {/* Mobile Number Field when Sign in with Number is active */}
-              <AnimatePresence>
-                {showNumberForm && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="overflow-hidden space-y-3"
-                  >
-                    <div className="relative">
-                      <Phone className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                      <input
-                        type="tel"
-                        value={phone}
-                        onChange={(e) => setPhone(e.target.value)}
-                        placeholder="মোবাইল নাম্বার (যেমন: 017XXXXXXXX)"
-                        autoComplete="tel"
-                        className="w-full h-11 pl-10 pr-3 rounded-xl bg-slate-900/85 border border-[#4285F4]/45 focus:border-[#4285F4] text-sm text-white placeholder:text-slate-500 outline-none transition"
-                      />
-                    </div>
+                  {/* Colorful Sign-In Action Stack */}
+                  <div className="grid grid-cols-1 gap-2.5 pt-1">
                     <button
                       type="button"
                       disabled={authLoading}
                       onClick={() => {
                         persistHint();
-                        onNumberLogin({ phone, password, name, photoUrl });
+                        onGoogleLogin({ name, password, photoUrl });
                       }}
-                      className="w-full h-12 rounded-2xl bg-gradient-to-r from-[#4285F4] to-[#06B6D4] text-white font-bold text-sm shadow-lg shadow-blue-500/25 active:scale-[0.98] transition disabled:opacity-60"
+                      className="w-full h-12 rounded-2xl bg-gradient-to-r from-white via-sky-50 to-emerald-50 hover:from-slate-50 hover:to-cyan-50 text-slate-900 font-bold text-sm flex items-center justify-center gap-2.5 shadow-[0_10px_30px_rgba(66,133,244,0.28)] active:scale-[0.98] transition disabled:opacity-60"
                     >
-                      {authLoading ? 'প্রবেশ করা হচ্ছে...' : 'নাম্বার দিয়ে প্রবেশ করুন'}
+                      <GoogleMark className="w-5 h-5 shrink-0" />
+                      <span>সাইন ইন উইথ গুগল</span>
                     </button>
-                  </motion.div>
-                )}
-              </AnimatePresence>
 
-              {authError && (
-                <div className="rounded-xl bg-rose-500/12 border border-rose-500/35 px-3.5 py-2.5 text-xs text-rose-200 space-y-2">
-                  <p className="leading-relaxed">{authError}</p>
-                  {unauthorizedDomain && (
-                    <div className="rounded-lg bg-slate-950/90 border border-slate-800 p-2.5 space-y-2 text-[11px] text-slate-300">
-                      <div className="flex items-center justify-between gap-2">
-                        <code className="font-mono-num text-emerald-300 truncate">
-                          {unauthorizedDomain}
-                        </code>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            navigator.clipboard?.writeText(unauthorizedDomain).then(() => {
-                              setCopiedDomain(true);
-                              window.setTimeout(() => setCopiedDomain(false), 2000);
-                            }).catch(() => {});
-                          }}
-                          className="shrink-0 inline-flex items-center gap-1 rounded-md bg-emerald-500/15 border border-emerald-500/30 px-2 py-1 text-[10px] font-semibold text-emerald-300"
-                        >
-                          {copiedDomain ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                          <span>{copiedDomain ? 'কপি হয়েছে' : 'কপি'}</span>
-                        </button>
-                      </div>
-                      <p className="text-slate-400 leading-relaxed">
-                        Firebase Console → Authentication → Settings → Authorized domains এ এই ডোমেইনটি যোগ করলে পুনরায় আপডেট ছাড়াই Google লগইন চালু হবে।
-                      </p>
-                    </div>
-                  )}
+                    <button
+                      type="button"
+                      disabled={authLoading}
+                      onClick={() => setShowNumberForm((v) => !v)}
+                      className="w-full h-12 rounded-2xl bg-gradient-to-r from-blue-600/25 via-indigo-600/25 to-violet-600/25 border border-indigo-400/45 hover:border-cyan-400/70 text-indigo-100 font-semibold text-sm flex items-center justify-center gap-2.5 shadow-md shadow-indigo-500/15 active:scale-[0.98] transition"
+                    >
+                      <Phone className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <span>{showNumberForm ? 'নাম্বার বক্স লুকান' : 'সাইন ইন উইথ নাম্বার'}</span>
+                    </button>
+
+                    {onOpenReportModal && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          persistHint();
+                          onOpenReportModal();
+                        }}
+                        className="w-full h-11 rounded-2xl bg-gradient-to-r from-amber-500/18 via-orange-500/15 to-rose-500/18 border border-amber-400/40 hover:border-amber-300/70 text-amber-200 font-semibold text-xs flex items-center justify-center gap-2 active:scale-[0.98] transition"
+                      >
+                        <AlertTriangle className="w-4 h-4 text-[#FBBC05] shrink-0" />
+                        <span>অ্যাপের সমস্যা সম্পর্কে এডমিনকে জানান</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
-              )}
-
-              {/* Sign-In Action Stack */}
-              <div className="grid grid-cols-1 gap-2.5 pt-1">
-                <button
-                  type="button"
-                  disabled={authLoading}
-                  onClick={() => {
-                    persistHint();
-                    onGoogleLogin({ name, password, photoUrl });
-                  }}
-                  className="w-full h-12 rounded-2xl bg-white hover:bg-slate-100 text-slate-900 font-bold text-sm flex items-center justify-center gap-2.5 shadow-[0_10px_28px_rgba(255,255,255,0.14)] active:scale-[0.98] transition disabled:opacity-60"
-                >
-                  <GoogleMark className="w-4.5 h-4.5 shrink-0" />
-                  <span>সাইন ইন উইথ গুগল</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={authLoading}
-                  onClick={() => setShowNumberForm((v) => !v)}
-                  className="w-full h-12 rounded-2xl bg-slate-900/90 border border-white/12 hover:border-[#4285F4]/55 text-slate-100 font-semibold text-sm flex items-center justify-center gap-2.5 active:scale-[0.98] transition"
-                >
-                  <Phone className="w-4 h-4 text-[#4285F4] shrink-0" />
-                  <span>{showNumberForm ? 'নাম্বার বক্স লুকান' : 'সাইন ইন উইথ নাম্বার'}</span>
-                </button>
-
-                {onOpenReportModal && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      persistHint();
-                      onOpenReportModal();
-                    }}
-                    className="w-full h-11 rounded-2xl bg-amber-500/[0.08] border border-amber-500/25 hover:border-amber-400/55 text-amber-200 font-semibold text-xs flex items-center justify-center gap-2 active:scale-[0.98] transition"
-                  >
-                    <AlertTriangle className="w-4 h-4 text-[#FBBC05] shrink-0" />
-                    <span>অ্যাপের সমস্যা সম্পর্কে এডমিনকে জানান</span>
-                  </button>
-                )}
               </div>
             </div>
           </div>

@@ -528,7 +528,15 @@ function AppContent() {
 
       const backedUpDownloads = await loadAppStateBackup<Record<string, DownloadRecord>>(CACHE_DOWNLOADS_KEY);
       if (active && backedUpDownloads && Object.keys(backedUpDownloads).length > 0) {
-        setDownloadsMap((curr) => ({ ...backedUpDownloads, ...curr }));
+        const offlineOnly: Record<string, DownloadRecord> = {};
+        for (const [id, rec] of Object.entries(backedUpDownloads)) {
+          if (rec && (rec.hasLocalVideo || rec.localVideoUri || rec.hasLocalPdf || rec.localPdfUri)) {
+            offlineOnly[id] = rec;
+          }
+        }
+        if (Object.keys(offlineOnly).length > 0) {
+          setDownloadsMap((curr) => ({ ...offlineOnly, ...curr }));
+        }
       }
     })();
 
@@ -573,6 +581,8 @@ function AppContent() {
           const next: Record<string, DownloadRecord> = {};
           for (const [id, existing] of Object.entries(prev)) {
             if (!entryMap.has(id)) {
+              const hasNative = Boolean(existing.localVideoUri || existing.localPdfUri);
+              if (!hasNative) continue;
               next[id] = {
                 ...existing,
                 hasLocalVideo: Boolean(existing.localVideoUri),
@@ -929,9 +939,20 @@ function AppContent() {
             }
             if (data.downloads) {
               setDownloadsMap((prev) => {
-                const merged = { ...data.downloads, ...prev };
-                writeLocalCache(CACHE_DOWNLOADS_KEY, merged);
-                return merged;
+                const next: Record<string, DownloadRecord> = {};
+                for (const [id, existing] of Object.entries(prev)) {
+                  const hasOffline = Boolean(
+                    existing.hasLocalVideo ||
+                      existing.localVideoUri ||
+                      existing.hasLocalPdf ||
+                      existing.localPdfUri
+                  );
+                  if (!hasOffline) continue;
+                  const cloud = data.downloads?.[id];
+                  next[id] = cloud ? { ...cloud, ...existing } : existing;
+                }
+                writeLocalCache(CACHE_DOWNLOADS_KEY, next);
+                return next;
               });
             }
           })
@@ -1052,21 +1073,38 @@ function AppContent() {
       )
     );
 
-    // 4. Downloads Registry (preserves local IndexedDB & native Capacitor file URI fields)
+    // 4. Downloads Registry (strictly keeps only records with verified local offline files on this phone)
     const dlPath = `users/${firebaseUser.uid}/downloads`;
     unsubs.push(
       onSnapshot(
         query(collection(db, dlPath), where('uid', '==', firebaseUser.uid)),
         (snap) => {
           setDownloadsMap((prev) => {
-            const next = { ...prev };
+            const next: Record<string, DownloadRecord> = {};
+            for (const [id, existing] of Object.entries(prev)) {
+              if (
+                existing &&
+                (existing.hasLocalVideo ||
+                  existing.localVideoUri ||
+                  existing.hasLocalPdf ||
+                  existing.localPdfUri)
+              ) {
+                next[id] = existing;
+              }
+            }
             snap.forEach((d) => {
               const rec = d.data() as DownloadRecord;
               const existing = prev[d.id];
+              const hasLocalVideo = Boolean(existing?.hasLocalVideo || existing?.localVideoUri);
+              const hasLocalPdf = Boolean(existing?.hasLocalPdf || existing?.localPdfUri);
+              if (!hasLocalVideo && !hasLocalPdf) {
+                // Skip cloud-only download records that are NOT stored offline on this phone
+                return;
+              }
               next[d.id] = {
                 ...rec,
-                hasLocalVideo: Boolean(existing?.hasLocalVideo || existing?.localVideoUri),
-                hasLocalPdf: Boolean(existing?.hasLocalPdf || existing?.localPdfUri),
+                hasLocalVideo,
+                hasLocalPdf,
                 localVideoUri: existing?.localVideoUri,
                 localPdfUri: existing?.localPdfUri,
                 matchedFileName: existing?.matchedFileName,
@@ -1673,22 +1711,28 @@ function AppContent() {
 
           // Remove stale native-only markers if file was deleted from device storage, keep IndexedDB blobs
           setDownloadsMap((prev) => {
-            const next = { ...prev };
-            for (const [id, existing] of Object.entries(next)) {
+            const next: Record<string, DownloadRecord> = {};
+            for (const [id, existing] of Object.entries(prev)) {
               const matched = matchedMap.get(id);
               const keepIdbVideo = idbVideoIds.has(id);
               const keepIdbPdf = idbPdfIds.has(id);
-              if ((existing.localVideoUri || existing.localPdfUri) && !matched) {
-                const updated: DownloadRecord = {
-                  ...existing,
-                  hasLocalVideo: keepIdbVideo,
-                  hasLocalPdf: keepIdbPdf,
-                };
-                delete updated.localVideoUri;
-                delete updated.localPdfUri;
-                delete updated.matchedFileName;
-                delete updated.matchScore;
-                next[id] = updated;
+              if (matched) {
+                next[id] = existing;
+              } else if (existing.localVideoUri || existing.localPdfUri) {
+                if (keepIdbVideo || keepIdbPdf) {
+                  const updated: DownloadRecord = {
+                    ...existing,
+                    hasLocalVideo: keepIdbVideo,
+                    hasLocalPdf: keepIdbPdf,
+                  };
+                  delete updated.localVideoUri;
+                  delete updated.localPdfUri;
+                  delete updated.matchedFileName;
+                  delete updated.matchScore;
+                  next[id] = updated;
+                }
+              } else if (keepIdbVideo || keepIdbPdf || existing.hasLocalVideo || existing.hasLocalPdf) {
+                next[id] = existing;
               }
             }
             writeLocalCache(CACHE_DOWNLOADS_KEY, next);
@@ -2133,11 +2177,16 @@ function AppContent() {
               >
                 <Download className="w-5 h-5" />
                 <span className="text-[11px] whitespace-nowrap">মাই ডাউনলোডস</span>
-                {Object.keys(downloadsMap).length > 0 && (
-                  <span className="absolute top-1.5 right-3 min-w-[16px] h-4 px-1 rounded-full bg-emerald-500 text-slate-950 text-[10px] font-mono-num font-bold flex items-center justify-center">
-                    {Object.keys(downloadsMap).length}
-                  </span>
-                )}
+                {(() => {
+                  const offlineCount = Object.values(downloadsMap).filter((d) =>
+                    Boolean(d && (d.hasLocalVideo || d.localVideoUri || d.hasLocalPdf || d.localPdfUri))
+                  ).length;
+                  return offlineCount > 0 ? (
+                    <span className="absolute top-1.5 right-3 min-w-[16px] h-4 px-1 rounded-full bg-emerald-500 text-slate-950 text-[10px] font-mono-num font-bold flex items-center justify-center">
+                      {offlineCount}
+                    </span>
+                  ) : null;
+                })()}
               </button>
 
               <button

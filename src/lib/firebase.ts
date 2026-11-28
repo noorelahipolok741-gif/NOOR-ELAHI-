@@ -103,13 +103,14 @@ async function ensureNativeSocialLoginInitialized(): Promise<void> {
 export async function signInWithGoogleSmart(): Promise<UserCredential> {
   if (Capacitor.isNativePlatform()) {
     await ensureNativeSocialLoginInitialized();
+    // Clear any cached Credential Manager selection so Android shows the full chooser with ALL Gmail accounts
+    await SocialLogin.logout({ provider: 'google' }).catch(() => {});
     const res = await SocialLogin.login({
       provider: 'google',
       options: {
-        style: 'bottom',
+        style: 'standard',
         filterByAuthorizedAccounts: false,
         autoSelectEnabled: false,
-        forcePrompt: true,
       },
     });
     const googleResult = res?.result;

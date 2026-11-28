@@ -118,7 +118,13 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
   }, [downloads]);
 
   const activeTasks = Object.values(downloadTasks);
-  const allDownloads = Object.values(downloads);
+  const allDownloads = useMemo(
+    () =>
+      Object.values(downloads).filter((d) =>
+        Boolean(d && (d.hasLocalVideo || d.localVideoUri || d.hasLocalPdf || d.localPdfUri))
+      ),
+    [downloads]
+  );
 
   const selectedMeta: SubjectMeta | undefined = useMemo(
     () => SUBJECT_LIST.find((s) => s.id === selectedSubjectId),
@@ -456,38 +462,38 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Colorful Rectangular Split Box: Left = Video, Right = PDF */}
+                  {/* Colorful Rectangular Split Box: Strictly Offline-Available Video & PDF */}
                   <div className="grid grid-cols-2 gap-2.5">
                     <button
                       type="button"
-                      disabled={!rec.videoUrl && !hasLocalVideo}
+                      disabled={!hasLocalVideo}
                       onClick={() => {
-                        if (!isOnline && !hasLocalVideo) {
+                        if (!hasLocalVideo) {
                           onOfflineAlert();
                           return;
                         }
                         onPlayDownloaded(rec);
                       }}
-                      className="rounded-2xl bg-gradient-to-br from-emerald-600/25 via-teal-600/20 to-cyan-600/25 border border-emerald-400/35 hover:border-emerald-400/70 p-3.5 flex items-center justify-center gap-2 text-emerald-200 font-semibold text-xs sm:text-sm active:scale-[0.98] transition disabled:opacity-40"
+                      className="rounded-2xl bg-gradient-to-br from-emerald-600/25 via-teal-600/20 to-cyan-600/25 border border-emerald-400/35 hover:border-emerald-400/70 p-3.5 flex items-center justify-center gap-2 text-emerald-200 font-semibold text-xs sm:text-sm active:scale-[0.98] transition disabled:opacity-35 disabled:grayscale"
                     >
                       <Video className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span>ভিডিও দেখুন</span>
+                      <span>{hasLocalVideo ? 'ভিডিও দেখুন' : 'ভিডিও সেভ নেই'}</span>
                     </button>
 
                     <button
                       type="button"
-                      disabled={!rec.pdfUrl && !hasLocalPdf}
+                      disabled={!hasLocalPdf}
                       onClick={() => {
-                        if (!isOnline && !hasLocalPdf) {
+                        if (!hasLocalPdf) {
                           onOfflineAlert();
                           return;
                         }
                         onOpenDownloadedPdf(rec);
                       }}
-                      className="rounded-2xl bg-gradient-to-br from-indigo-600/25 via-violet-600/20 to-purple-600/25 border border-indigo-400/35 hover:border-indigo-400/70 p-3.5 flex items-center justify-center gap-2 text-indigo-200 font-semibold text-xs sm:text-sm active:scale-[0.98] transition disabled:opacity-40"
+                      className="rounded-2xl bg-gradient-to-br from-indigo-600/25 via-violet-600/20 to-purple-600/25 border border-indigo-400/35 hover:border-indigo-400/70 p-3.5 flex items-center justify-center gap-2 text-indigo-200 font-semibold text-xs sm:text-sm active:scale-[0.98] transition disabled:opacity-35 disabled:grayscale"
                     >
                       <FileText className="w-4 h-4 text-indigo-300 shrink-0" />
-                      <span>PDF পড়ুন</span>
+                      <span>{hasLocalPdf ? 'PDF পড়ুন' : 'PDF সেভ নেই'}</span>
                     </button>
                   </div>
                 </div>

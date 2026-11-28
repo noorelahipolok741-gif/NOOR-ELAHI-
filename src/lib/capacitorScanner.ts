@@ -12,6 +12,7 @@ import {
   pickNativeDownloadFolder,
   readNativeUriAsBlob,
   requestNativePermissionsDetailed,
+  resolveNativePlayableVideoUri,
   saveBase64ToNativePublicStorage,
   scanNativePublicFiles,
 } from './noorStoragePlugin';
@@ -23,6 +24,7 @@ export interface ScannedNativeFile {
   uri: string;
   sizeBytes: number;
   kind: 'video' | 'pdf';
+  folder?: string;
   compactNorm: string;
   spacedNorm: string;
 }
@@ -85,6 +87,15 @@ export function toPlayableNativeSrc(fileUri: string): string {
   }
 }
 
+export async function prepareNativePlayableVideoSrc(fileUri: string): Promise<string> {
+  if (!fileUri) return '';
+  if (isCapacitorNative() && isNoorNativeStorageAvailable() && fileUri.startsWith('content://')) {
+    const resolved = await resolveNativePlayableVideoUri(fileUri);
+    return toPlayableNativeSrc(resolved || fileUri);
+  }
+  return toPlayableNativeSrc(fileUri);
+}
+
 export function isNativeConvertedOrFileUrl(url?: string | null): boolean {
   if (!url) return false;
   return (
@@ -130,6 +141,109 @@ export function normalizeSpacedName(raw: string): string {
     .trim();
 }
 
+function extractNumberTokens(raw: string): string[] {
+  const spaced = normalizeSpacedName(raw);
+  const matches = spaced.match(/\d+/g);
+  return matches ? matches.map((n) => String(parseInt(n, 10))) : [];
+}
+
+function hasNumberConflict(targetRaw: string, fileRaw: string): boolean {
+  const targetNums = extractNumberTokens(targetRaw);
+  const fileNums = extractNumberTokens(fileRaw);
+  if (targetNums.length === 0 || fileNums.length === 0) return false;
+  const fileSet = new Set(fileNums);
+  // Every explicit number in target (e.g. Class 1, Part 2) must exist as a distinct number in filename (so "1" never matches "10" or "2")
+  for (const num of targetNums) {
+    if (!fileSet.has(num)) return true;
+  }
+  return false;
+}
+
+const SUBJECT_FAMILY_KEYWORDS: Record<string, string[]> = {
+  eng: ['english', 'eng', 'ইংলিশ', 'ইংরেজি', 'grammar'],
+  ban: ['bangla', 'bengali', 'ban', 'বাংলা'],
+  math: ['math', 'mathematics', 'গণিত', 'গনিত', 'অঙ্ক', 'অংক'],
+  agri: ['agri', 'agriculture', 'কৃষি'],
+  ict: ['ict', 'information', 'আইসিটি', 'তথ্য', 'যোগাযোগ'],
+};
+
+function getSubjectFamily(subjectId: string): string {
+  if (subjectId.startsWith('eng')) return 'eng';
+  if (subjectId.startsWith('ban')) return 'ban';
+  return subjectId;
+}
+
+function detectSubjectAndPaperCheck(
+  subjectId: string,
+  sectionTitle: string,
+  file: ScannedNativeFile
+): { conflict: boolean; bonus: number } {
+  const fileSearchText = normalizeSpacedName(`${file.name} ${file.folder || ''}`);
+  const fileCompact = normalizeCompactName(`${file.name} ${file.folder || ''}`);
+  const myFamily = getSubjectFamily(subjectId);
+
+  const matchedFamilies = new Set<string>();
+  for (const [family, keywords] of Object.entries(SUBJECT_FAMILY_KEYWORDS)) {
+    for (const kw of keywords) {
+      const kwNorm = normalizeSpacedName(kw);
+      if (!kwNorm) continue;
+      const tokens = fileSearchText.split(' ');
+      if (
+        tokens.includes(kwNorm) ||
+        (kwNorm.length >= 4 && fileCompact.includes(kwNorm))
+      ) {
+        matchedFamilies.add(family);
+        break;
+      }
+    }
+  }
+
+  // If the file or its parent folder explicitly names a different subject family and NOT ours -> hard reject
+  if (matchedFamilies.size > 0 && !matchedFamilies.has(myFamily)) {
+    return { conflict: true, bonus: 0 };
+  }
+
+  // Check 1st vs 2nd paper conflicts for English & Bangla
+  if (subjectId === 'eng-1' || subjectId === 'eng-2' || subjectId === 'ban-1' || subjectId === 'ban-2') {
+    const isPaper1Subject = subjectId.endsWith('-1');
+    const hasPaper1Marker =
+      /\b(1st|first|paper\s*1|p1|eng\s*1|ban\s*1)\b/.test(fileSearchText) ||
+      fileSearchText.includes('১ম') ||
+      fileSearchText.includes('প্রথম');
+    const hasPaper2Marker =
+      /\b(2nd|second|paper\s*2|p2|eng\s*2|ban\s*2)\b/.test(fileSearchText) ||
+      fileSearchText.includes('২য়') ||
+      fileSearchText.includes('দ্বিতীয়') ||
+      fileSearchText.includes('দ্বিতীয়');
+
+    if (isPaper1Subject && hasPaper2Marker && !hasPaper1Marker) {
+      return { conflict: true, bonus: 0 };
+    }
+    if (!isPaper1Subject && hasPaper1Marker && !hasPaper2Marker) {
+      return { conflict: true, bonus: 0 };
+    }
+  }
+
+  let bonus = 0;
+  if (matchedFamilies.has(myFamily)) {
+    bonus += 0.08;
+  }
+  const secNorm = normalizeCompactName(sectionTitle);
+  if (secNorm.length >= 4 && fileCompact.includes(secNorm)) {
+    bonus += 0.06;
+  }
+  return { conflict: false, bonus };
+}
+
+function stripPdfQualifiers(raw: string): string {
+  return (raw || '')
+    .replace(/\.pdf$/i, '')
+    .replace(/\b(pdf|lecture\s*sheet|sheet|notes?|hand\s*note|class\s*note|slide)\b/gi, ' ')
+    .replace(/(পিডিএফ|লেকচার\s*শিট|নোটস?|শিট|স্লাইড)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function levenshteinDistance(a: string, b: string): number {
   const m = a.length;
   const n = b.length;
@@ -165,6 +279,10 @@ export function computeNameSimilarity(vaultName: string, deviceFileName: string)
 
   if (compactTarget === compactFile) return 1;
 
+  if (hasNumberConflict(vaultName, deviceFileName)) {
+    return 0;
+  }
+
   const maxLen = Math.max(compactTarget.length, compactFile.length);
   const dist = levenshteinDistance(compactTarget, compactFile);
   let score = 1 - dist / maxLen;
@@ -172,11 +290,13 @@ export function computeNameSimilarity(vaultName: string, deviceFileName: string)
   // Check clean token / substring containment (e.g., extra prefix/suffix on Drive filename)
   if (compactTarget.length >= 5 && compactFile.includes(compactTarget)) {
     const ratio = compactTarget.length / compactFile.length;
-    const containmentScore = Math.max(0.84, 0.96 - (1 - ratio) * 0.12);
-    if (containmentScore > score) score = containmentScore;
+    if (ratio >= 0.45) {
+      const containmentScore = Math.max(0.82, 0.96 - (1 - ratio) * 0.14);
+      if (containmentScore > score) score = containmentScore;
+    }
   } else if (compactFile.length >= 5 && compactTarget.includes(compactFile)) {
     const ratio = compactFile.length / compactTarget.length;
-    if (ratio >= 0.8) {
+    if (ratio >= 0.78) {
       const containmentScore = Math.max(0.82, ratio);
       if (containmentScore > score) score = containmentScore;
     }
@@ -204,35 +324,50 @@ function scoreCandidateMatch(
   candidateNames: string[],
   driveId: string | null,
   expectedSizeMB: number | undefined,
+  subjectId: string,
+  sectionTitle: string,
   file: ScannedNativeFile
 ): number {
   if (driveId && file.name.includes(driveId)) {
-    return 1;
+    return 1.2;
   }
+
+  const subjectCheck = detectSubjectAndPaperCheck(subjectId, sectionTitle, file);
+  if (subjectCheck.conflict) {
+    return 0;
+  }
+
+  const fileCompareNames =
+    file.kind === 'pdf'
+      ? Array.from(new Set([file.name, stripPdfQualifiers(file.name)].filter(Boolean)))
+      : [file.name];
 
   let bestNameScore = 0;
   for (const name of candidateNames) {
     if (!name.trim()) continue;
-    const s = computeNameSimilarity(name, file.name);
-    if (s > bestNameScore) bestNameScore = s;
+    for (const fName of fileCompareNames) {
+      const s = computeNameSimilarity(name, fName);
+      if (s > bestNameScore) bestNameScore = s;
+    }
   }
 
   if (bestNameScore < 0.8) {
     return 0;
   }
 
+  let finalScore = bestNameScore + subjectCheck.bonus;
+
   if (expectedSizeMB && expectedSizeMB > 0 && file.sizeBytes > 0) {
     const expectedBytes = expectedSizeMB * 1024 * 1024;
     const diffRatio = Math.abs(file.sizeBytes - expectedBytes) / expectedBytes;
     if (diffRatio <= 0.25) {
-      return Math.min(1, bestNameScore + 0.05);
-    }
-    if (diffRatio > 0.7 && bestNameScore < 0.92) {
+      finalScore += 0.05;
+    } else if (diffRatio > 0.7 && bestNameScore < 0.92) {
       return 0;
     }
   }
 
-  return bestNameScore;
+  return finalScore;
 }
 
 export async function getDetailedNativePermissionStatus(): Promise<NoorPermissionStatus> {
@@ -434,7 +569,8 @@ async function collectNativeDownloadFiles(): Promise<ScannedNativeFile[]> {
     name: string,
     uri: string,
     sizeBytes: number,
-    kind: 'video' | 'pdf'
+    kind: 'video' | 'pdf',
+    folder?: string
   ) => {
     if (!name || !uri || seenUris.has(uri)) return;
     const compactNorm = normalizeCompactName(name);
@@ -451,6 +587,7 @@ async function collectNativeDownloadFiles(): Promise<ScannedNativeFile[]> {
       uri,
       sizeBytes,
       kind,
+      folder,
       compactNorm,
       spacedNorm,
     });
@@ -469,7 +606,7 @@ async function collectNativeDownloadFiles(): Promise<ScannedNativeFile[]> {
             ? 'video'
             : null;
         if (!kind) continue;
-        pushNormalizedEntry(item.name, item.uri, Number(item.sizeBytes || 0), kind);
+        pushNormalizedEntry(item.name, item.uri, Number(item.sizeBytes || 0), kind, item.folder);
       }
     } catch {
       // Continue to Capacitor Filesystem fallback below
@@ -604,41 +741,45 @@ export async function autoScanDownloadsWithCapacitor(
       }
     }
 
-    const matchedRecords: DownloadRecord[] = [];
     const total = catalogItems.length;
 
-    for (let idx = 0; idx < total; idx += 1) {
-      const { subject, sectionId, sectionTitle, classIndex, item, primaryVideoUrl } =
-        catalogItems[idx];
-
-      const urlFilenameHint = (() => {
-        const candidates = [primaryVideoUrl, item.pdfUrl].filter(Boolean);
-        for (const raw of candidates) {
-          try {
-            const u = new URL(raw);
-            if (u.hostname.includes('drive.google.com') || u.hostname.includes('docs.google.com')) continue;
-            const seg = decodeURIComponent(u.pathname.split('/').pop() || '').trim();
-            if (seg && seg.length >= 4 && !/^(view|preview|download|uc|index\.html)$/i.test(seg)) {
-              return seg;
-            }
-          } catch {
-            // Ignore malformed URL
-          }
+    const extractUrlHint = (raw?: string): string => {
+      if (!raw) return '';
+      try {
+        const u = new URL(raw);
+        if (u.hostname.includes('drive.google.com') || u.hostname.includes('docs.google.com')) {
+          return '';
         }
-        return '';
-      })();
+        const seg = decodeURIComponent(u.pathname.split('/').pop() || '').trim();
+        if (seg && seg.length >= 4 && !/^(view|preview|download|uc|index\.html)$/i.test(seg)) {
+          return seg;
+        }
+      } catch {
+        // Ignore malformed URL
+      }
+      return '';
+    };
 
-      const candidateNames = [
+    const videoCandidates: Array<{ idx: number; file: ScannedNativeFile; score: number }> = [];
+    const pdfCandidates: Array<{ idx: number; file: ScannedNativeFile; score: number }> = [];
+
+    for (let idx = 0; idx < total; idx += 1) {
+      const { subject, sectionTitle, classIndex, item, primaryVideoUrl } = catalogItems[idx];
+
+      const videoUrlHint = extractUrlHint(primaryVideoUrl);
+      const pdfUrlHint = extractUrlHint(item.pdfUrl);
+
+      const baseNames = [
         item.name || '',
-        urlFilenameHint,
         `${subject.name} ${item.name || ''}`,
         `${sectionTitle} ${item.name || ''}`,
         `${subject.name} Class ${classIndex}`,
+        `${subject.name} ক্লাস ${classIndex}`,
       ].filter((s) => Boolean(s.trim()));
 
-      const pdfDriveId = getGoogleDriveFileId(item.pdfUrl);
+      const videoNames = videoUrlHint ? [...baseNames, videoUrlHint] : baseNames;
+      const pdfNames = pdfUrlHint ? [...baseNames, pdfUrlHint] : baseNames;
 
-      let bestVideo: { file: ScannedNativeFile; score: number } | null = null;
       const allVideoLinks = (
         item.videoUrls && item.videoUrls.length > 0
           ? item.videoUrls
@@ -654,59 +795,102 @@ export async function autoScanDownloadsWithCapacitor(
           const partNames =
             allVideoLinks.length > 1
               ? [
-                  ...candidateNames,
+                  ...videoNames,
                   `${item.name || ''} Part ${vIdx + 1}`,
                   `${item.name || ''} (পার্ট ${vIdx + 1})`,
                 ]
-              : candidateNames;
+              : videoNames;
           for (const vf of videoFiles) {
-            const score = scoreCandidateMatch(partNames, vDriveId, item.expectedSizeMB, vf);
-            if (score >= 0.8 && (!bestVideo || score > bestVideo.score)) {
-              bestVideo = { file: vf, score };
+            const score = scoreCandidateMatch(
+              partNames,
+              vDriveId,
+              item.expectedSizeMB,
+              subject.id,
+              sectionTitle,
+              vf
+            );
+            if (score >= 0.8) {
+              videoCandidates.push({ idx, file: vf, score });
             }
           }
         }
       }
 
-      let bestPdf: { file: ScannedNativeFile; score: number } | null = null;
       if (item.pdfUrl) {
+        const pdfDriveId = getGoogleDriveFileId(item.pdfUrl);
         for (const pf of pdfFiles) {
-          const score = scoreCandidateMatch(candidateNames, pdfDriveId, undefined, pf);
-          if (score >= 0.8 && (!bestPdf || score > bestPdf.score)) {
-            bestPdf = { file: pf, score };
+          const score = scoreCandidateMatch(
+            pdfNames,
+            pdfDriveId,
+            undefined,
+            subject.id,
+            sectionTitle,
+            pf
+          );
+          if (score >= 0.8) {
+            pdfCandidates.push({ idx, file: pf, score });
           }
         }
       }
 
-      if (bestVideo || bestPdf) {
-        const sizeBytes = (bestVideo?.file.sizeBytes || 0) + (bestPdf?.file.sizeBytes || 0);
-        const topScore = Math.max(bestVideo?.score || 0, bestPdf?.score || 0);
-
-        matchedRecords.push({
-          uid,
-          itemId: item.id,
-          subjectId: subject.id,
-          sectionId,
-          sectionTitle,
-          classNumber: classIndex,
-          videoName: item.name,
-          videoUrl: primaryVideoUrl,
-          pdfUrl: item.pdfUrl,
-          fileSizeBytes: sizeBytes,
-          hasLocalVideo: Boolean(bestVideo),
-          hasLocalPdf: Boolean(bestPdf),
-          localVideoUri: bestVideo?.file.uri,
-          localPdfUri: bestPdf?.file.uri,
-          matchedFileName: bestVideo?.file.name || bestPdf?.file.name,
-          matchScore: Math.round(topScore * 100),
-        });
-      }
-
-      options?.onProgress?.(idx + 1, total, matchedRecords.length);
+      options?.onProgress?.(idx + 1, total, 0);
       if (idx % 5 === 0) {
         await yieldFrame();
       }
     }
+
+    // Global 1-to-1 best-score assignment so a single PDF or video file cannot spill into wrong subjects/classes
+    videoCandidates.sort((a, b) => b.score - a.score);
+    pdfCandidates.sort((a, b) => b.score - a.score);
+
+    const assignedVideos = new Map<number, { file: ScannedNativeFile; score: number }>();
+    const usedVideoUris = new Set<string>();
+    for (const cand of videoCandidates) {
+      if (assignedVideos.has(cand.idx) || usedVideoUris.has(cand.file.uri)) continue;
+      assignedVideos.set(cand.idx, { file: cand.file, score: cand.score });
+      usedVideoUris.add(cand.file.uri);
+    }
+
+    const assignedPdfs = new Map<number, { file: ScannedNativeFile; score: number }>();
+    const usedPdfUris = new Set<string>();
+    for (const cand of pdfCandidates) {
+      if (assignedPdfs.has(cand.idx) || usedPdfUris.has(cand.file.uri)) continue;
+      assignedPdfs.set(cand.idx, { file: cand.file, score: cand.score });
+      usedPdfUris.add(cand.file.uri);
+    }
+
+    const matchedRecords: DownloadRecord[] = [];
+    for (let idx = 0; idx < total; idx += 1) {
+      const bestVideo = assignedVideos.get(idx) || null;
+      const bestPdf = assignedPdfs.get(idx) || null;
+      if (!bestVideo && !bestPdf) continue;
+
+      const { subject, sectionId, sectionTitle, classIndex, item, primaryVideoUrl } =
+        catalogItems[idx];
+      const sizeBytes = (bestVideo?.file.sizeBytes || 0) + (bestPdf?.file.sizeBytes || 0);
+      const topScore = Math.min(1, Math.max(bestVideo?.score || 0, bestPdf?.score || 0));
+
+      matchedRecords.push({
+        uid,
+        itemId: item.id,
+        subjectId: subject.id,
+        sectionId,
+        sectionTitle,
+        classNumber: classIndex,
+        videoName: item.name,
+        videoUrl: primaryVideoUrl,
+        pdfUrl: item.pdfUrl,
+        fileSizeBytes: sizeBytes,
+        hasLocalVideo: Boolean(bestVideo),
+        hasLocalPdf: Boolean(bestPdf),
+        localVideoUri: bestVideo?.file.uri,
+        localPdfUri: bestPdf?.file.uri,
+        matchedFileName: bestVideo?.file.name || bestPdf?.file.name,
+        matchScore: Math.round(topScore * 100),
+      });
+    }
+
+    options?.onProgress?.(total, total, matchedRecords.length);
 
     return {
       status: 'granted',

@@ -18,6 +18,22 @@ export class ErrorBoundary extends React.Component<
     return { hasError: true, errorMessage: error.message || 'Unknown error' };
   }
 
+  handleRecover = () => {
+    this.setState({ hasError: false, errorMessage: '' }, () => {
+      try {
+        if (typeof window !== 'undefined') {
+          window.location.replace(window.location.origin + '/');
+        }
+      } catch {
+        try {
+          window.location.reload();
+        } catch {
+          // State already reset so children re-render cleanly
+        }
+      }
+    });
+  };
+
   render() {
     if (this.state.hasError) {
       return (
@@ -28,8 +44,9 @@ export class ErrorBoundary extends React.Component<
               অ্যাপটি পুনরায় লোড করার জন্য নিচের বাটনে চাপ দিন।
             </p>
             <button
-              onClick={() => window.location.reload()}
-              className="w-full py-3 px-4 rounded-xl bg-emerald-500 text-slate-950 font-semibold text-sm hover:bg-emerald-400 transition"
+              type="button"
+              onClick={this.handleRecover}
+              className="w-full py-3 px-4 rounded-xl bg-emerald-500 text-slate-950 font-semibold text-sm hover:bg-emerald-400 active:scale-[0.98] transition"
             >
               পুনরায় চেষ্টা করুন
             </button>

@@ -814,9 +814,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       ? blobUrl
       : safePdfUrl || (pdfBlob && blobUrl ? blobUrl : '');
 
-  const directSaveHref = blobUrl
-    ? blobUrl
-    : safePdfUrl || '';
+  const canSavePdfOffline = Boolean(pdfBlob && blobUrl && viewerMode === 'pdfjs');
 
   const handleCopyLink = async () => {
     if (!normalizedPdfUrl) return;
@@ -1004,7 +1002,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
             </button>
           )}
 
-          {directSaveHref && (
+          {canSavePdfOffline && (
             isCapacitorNative() ? (
               <button
                 type="button"
@@ -1022,35 +1020,8 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
               </button>
             ) : (
               <a
-                href={directSaveHref}
-                download={blobUrl ? downloadFilename : undefined}
-                target={blobUrl ? undefined : '_blank'}
-                rel={blobUrl ? undefined : 'noopener noreferrer'}
-                onClick={() => {
-                  if (!blobUrl && typeof navigator !== 'undefined' && navigator.onLine && pdfUrl) {
-                    const proxyTarget = resolveStreamUrl(normalizeMediaUrl(pdfUrl), 'pdf');
-                    if (proxyTarget) {
-                      fetch(proxyTarget)
-                        .then((r) => (r.ok ? r.blob() : null))
-                        .then(async (b) => {
-                          if (!b || !(await blobStartsWithPdfHeader(b))) return;
-                          const entry = await saveOfflineBlobForClass({
-                            itemId,
-                            videoName: title,
-                            pdfUrl,
-                            pdfBlob: b,
-                          });
-                          onOfflineCached?.({
-                            itemId,
-                            fileSizeBytes: entry.fileSizeBytes,
-                            hasLocalVideo: Boolean(entry.videoBlob && entry.videoBlob.size > 0),
-                            hasLocalPdf: Boolean(entry.pdfBlob && entry.pdfBlob.size > 0),
-                          });
-                        })
-                        .catch(() => {});
-                    }
-                  }
-                }}
+                href={blobUrl || '#'}
+                download={downloadFilename}
                 className="flex items-center gap-1 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 px-2.5 py-2 text-xs font-semibold text-emerald-300 transition"
                 title="মোবাইলে PDF সেভ করুন"
               >
@@ -1170,34 +1141,6 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                   <Globe className="w-3.5 h-3.5" />
                   <span>অনলাইন ভিউয়ার</span>
                 </button>
-              )}
-              {directSaveHref && (
-                isCapacitorNative() ? (
-                  <button
-                    type="button"
-                    disabled={savingPdf}
-                    onClick={() => void handleSavePdfClick()}
-                    className="px-4 py-2.5 rounded-xl bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-60"
-                  >
-                    {savingPdf ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Download className="w-3.5 h-3.5" />
-                    )}
-                    <span>{savingPdf ? 'সেভ হচ্ছে' : 'PDF সেভ করুন'}</span>
-                  </button>
-                ) : (
-                  <a
-                    href={directSaveHref}
-                    download={blobUrl ? downloadFilename : undefined}
-                    target={blobUrl ? undefined : '_blank'}
-                    rel={blobUrl ? undefined : 'noopener noreferrer'}
-                    className="px-4 py-2.5 rounded-xl bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>PDF সেভ করুন</span>
-                  </a>
-                )
               )}
               {safePdfUrl && (
                 <>
