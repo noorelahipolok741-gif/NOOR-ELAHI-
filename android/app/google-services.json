@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "966508498148",
+    "project_id": "noor-elahi-84e9a",
+    "storage_bucket": "noor-elahi-84e9a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:966508498148:android:7473a1c47b225b606b30f1",
+        "android_client_info": {
+          "package_name": "com.noorelahi.learning"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "966508498148-q3hvjoj0d0vtnbsda3fp8k6fl3t0bnkg.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.noorelahi.learning",
+            "certificate_hash": "90d3e4e46626caa4762f94f6e0e253bacf801854"
+          }
+        },
+        {
+          "client_id": "966508498148-ak9rn7c246pr3b71bgdo5qra2n69tprv.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDg_23dAcpeNDpLbJKddQCrrmMWR8k-dCE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "966508498148-ak9rn7c246pr3b71bgdo5qra2n69tprv.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
