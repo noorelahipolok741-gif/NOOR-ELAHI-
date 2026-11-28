@@ -222,6 +222,7 @@ function AppContent() {
   const appUserRef = useRef<AppUser | null>(appUser);
   appUserRef.current = appUser;
   const historySeqRef = useRef<number>(0);
+  const pendingBackResolverRef = useRef<((prev: NavState) => NavState) | null>(null);
   const lastExitBackPressRef = useRef<number>(0);
 
   const {
@@ -314,6 +315,25 @@ function AppContent() {
 
     const handlePopState = (event: PopStateEvent) => {
       const st = event.state as { __noorSeq?: number; nav?: NavState } | null;
+      const pendingResolver = pendingBackResolverRef.current;
+      if (pendingResolver) {
+        pendingBackResolverRef.current = null;
+        const resolvedNav = pendingResolver(navRef.current);
+        const nextSeq =
+          st && typeof st.__noorSeq === 'number'
+            ? st.__noorSeq
+            : Math.max(0, historySeqRef.current - 1);
+        historySeqRef.current = nextSeq;
+        navRef.current = resolvedNav;
+        setNav(resolvedNav);
+        try {
+          window.history.replaceState({ __noorSeq: nextSeq, nav: resolvedNav }, '');
+        } catch {
+          // Ignore history replace error
+        }
+        return;
+      }
+
       if (st && typeof st.__noorSeq === 'number' && st.nav) {
         historySeqRef.current = st.__noorSeq;
         navRef.current = st.nav;
@@ -349,27 +369,41 @@ function AppContent() {
     const seqBefore = historySeqRef.current;
     if (seqBefore >= steps) {
       try {
+        pendingBackResolverRef.current = fallbackUpdater;
         if (steps === 1) {
           window.history.back();
         } else {
           window.history.go(-steps);
         }
         window.setTimeout(() => {
-          if (historySeqRef.current === seqBefore) {
+          if (pendingBackResolverRef.current === fallbackUpdater) {
+            pendingBackResolverRef.current = null;
             const next = fallbackUpdater(navRef.current);
+            const nextSeq = Math.max(0, seqBefore - steps);
+            historySeqRef.current = nextSeq;
             navRef.current = next;
             setNav(next);
-            historySeqRef.current = Math.max(0, seqBefore - steps);
+            try {
+              window.history.replaceState({ __noorSeq: nextSeq, nav: next }, '');
+            } catch {
+              // Ignore history replace error
+            }
           }
         }, 120);
         return;
       } catch {
+        pendingBackResolverRef.current = null;
         // Fall through to local update
       }
     }
     const next = fallbackUpdater(navRef.current);
     navRef.current = next;
     setNav(next);
+    try {
+      window.history.replaceState({ __noorSeq: historySeqRef.current, nav: next }, '');
+    } catch {
+      // Ignore history replace error
+    }
   }, []);
 
   const switchTab = useCallback(
@@ -442,11 +476,11 @@ function AppContent() {
 
       if (appUserRef.current) {
         if (curr.activeTab === 'subjects' && curr.subjectId) {
-          goBackOr((p) => ({ ...p, subjectId: null }));
+          goBackOr((p) => ({ ...p, activeTab: 'subjects', subjectId: null }));
           return 'handled';
         }
         if (curr.activeTab === 'downloads' && curr.downloadSubjectId) {
-          goBackOr((p) => ({ ...p, downloadSubjectId: null }));
+          goBackOr((p) => ({ ...p, activeTab: 'downloads', downloadSubjectId: null }));
           return 'handled';
         }
         if (curr.activeTab !== 'subjects') {
@@ -2074,9 +2108,9 @@ function AppContent() {
                   selectedSubjectId={selectedSubjectId}
                   onSelectSubjectId={(sid) => {
                     if (sid === null) {
-                      goBackOr((p) => ({ ...p, subjectId: null }));
+                      goBackOr((p) => ({ ...p, activeTab: 'subjects', subjectId: null }));
                     } else {
-                      pushNav((p) => ({ ...p, subjectId: sid }));
+                      pushNav((p) => ({ ...p, activeTab: 'subjects', subjectId: sid }));
                     }
                   }}
                   onPlayVideo={(payload) => pushNav((p) => ({ ...p, activeVideo: payload }))}
@@ -2114,9 +2148,9 @@ function AppContent() {
                   selectedSubjectId={downloadSubjectId}
                   onSelectSubjectId={(sid) => {
                     if (sid === null) {
-                      goBackOr((p) => ({ ...p, downloadSubjectId: null }));
+                      goBackOr((p) => ({ ...p, activeTab: 'downloads', downloadSubjectId: null }));
                     } else {
-                      pushNav((p) => ({ ...p, downloadSubjectId: sid }));
+                      pushNav((p) => ({ ...p, activeTab: 'downloads', downloadSubjectId: sid }));
                     }
                   }}
                   onOfflineAlert={() => {

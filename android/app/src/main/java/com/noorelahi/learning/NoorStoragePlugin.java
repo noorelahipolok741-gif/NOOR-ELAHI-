@@ -1157,6 +1157,57 @@ public class NoorStoragePlugin extends Plugin {
         }
     }
 
+    private static boolean hasPdfMagicHeader(File file) {
+        if (file == null || !file.isFile() || !file.canRead() || file.length() < 5 || file.length() > 150L * 1024L * 1024L) {
+            return false;
+        }
+        String lower = file.getName().toLowerCase(Locale.ROOT);
+        if (
+            lower.endsWith(".apk") ||
+            lower.endsWith(".jpg") ||
+            lower.endsWith(".jpeg") ||
+            lower.endsWith(".png") ||
+            lower.endsWith(".webp") ||
+            lower.endsWith(".gif") ||
+            lower.endsWith(".zip") ||
+            lower.endsWith(".rar") ||
+            lower.endsWith(".7z") ||
+            lower.endsWith(".mp3") ||
+            lower.endsWith(".m4a") ||
+            lower.endsWith(".wav") ||
+            lower.endsWith(".ogg") ||
+            lower.endsWith(".aac") ||
+            lower.endsWith(".txt") ||
+            lower.endsWith(".json") ||
+            lower.endsWith(".html") ||
+            lower.endsWith(".htm") ||
+            lower.endsWith(".xml") ||
+            lower.endsWith(".doc") ||
+            lower.endsWith(".docx") ||
+            lower.endsWith(".xls") ||
+            lower.endsWith(".xlsx") ||
+            lower.endsWith(".ppt") ||
+            lower.endsWith(".pptx") ||
+            lower.endsWith(".tmp") ||
+            lower.endsWith(".part") ||
+            lower.endsWith(".crdownload")
+        ) {
+            return false;
+        }
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byte[] header = new byte[5];
+            int read = fis.read(header);
+            return read == 5 &&
+                header[0] == 0x25 && // %
+                header[1] == 0x50 && // P
+                header[2] == 0x44 && // D
+                header[3] == 0x46 && // F
+                header[4] == 0x2D;   // -
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private void scanDirectFolderRecursive(File dir, int depth, int maxDepth, Map<String, ScannedEntry> out) {
         if (dir == null || !dir.exists() || !dir.isDirectory() || depth > maxDepth) return;
         File[] children = dir.listFiles();
@@ -1176,6 +1227,9 @@ public class NoorStoragePlugin extends Plugin {
             }
             if (!f.canRead() || f.length() <= 0) continue;
             String kind = detectKind(f.getName(), null);
+            if (kind == null && hasPdfMagicHeader(f)) {
+                kind = "pdf";
+            }
             if (kind == null) continue;
             ScannedEntry entry = new ScannedEntry();
             entry.name = f.getName();

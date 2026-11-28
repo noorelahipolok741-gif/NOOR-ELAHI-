@@ -119,7 +119,7 @@ export function normalizeCompactName(raw: string): string {
     .replace(/[০-৯]/g, (ch) => BENGALI_TO_ASCII_DIGITS[ch] || ch);
 
   return withAsciiDigits
-    .replace(/\.[^/.]+$/, '')
+    .replace(/\.(pdf|mp4|mkv|webm|mov|m4v|avi|3gp|flv|ts|m4a)$/i, '')
     .replace(/\(\s*\d+\s*\)/g, '')
     .replace(/\[\s*\d+\s*\]/g, '')
     .replace(/[-_.\s,:;|/\\()[\]'"]+/g, '')
@@ -133,7 +133,7 @@ export function normalizeSpacedName(raw: string): string {
     .replace(/[০-৯]/g, (ch) => BENGALI_TO_ASCII_DIGITS[ch] || ch);
 
   return withAsciiDigits
-    .replace(/\.[^/.]+$/, '')
+    .replace(/\.(pdf|mp4|mkv|webm|mov|m4v|avi|3gp|flv|ts|m4a)$/i, '')
     .replace(/\(\s*\d+\s*\)/g, ' ')
     .replace(/\[\s*\d+\s*\]/g, ' ')
     .replace(/[-_.,:|/\\()[\]'"]+/g, ' ')
@@ -411,6 +411,48 @@ function scoreCandidateMatch(
   }
 
   return finalScore;
+}
+
+function normalizeExactPdfFullName(raw: string): string {
+  return (raw || '')
+    .normalize('NFC')
+    .trim()
+    .replace(/\.pdf$/i, '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function sanitizeExactPdfFsName(raw: string): string {
+  return normalizeExactPdfFullName(raw)
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function scoreExactPdfMatch(item: ClassItem, file: ScannedNativeFile): number {
+  const fileExact = normalizeExactPdfFullName(file.name);
+  if (!fileExact) return 0;
+  const fileSanitized = sanitizeExactPdfFsName(file.name);
+
+  const explicitPdfName = (item.pdfFileName || '').trim();
+  const itemName = (item.name || '').trim();
+
+  if (explicitPdfName) {
+    const targetExact = normalizeExactPdfFullName(explicitPdfName);
+    if (targetExact && targetExact === fileExact) return 1.25;
+    const targetSanitized = sanitizeExactPdfFsName(explicitPdfName);
+    if (targetSanitized && targetSanitized === fileSanitized) return 1.2;
+  }
+
+  if (itemName) {
+    const nameExact = normalizeExactPdfFullName(itemName);
+    if (nameExact && nameExact === fileExact) return 1.05;
+    const nameSanitized = sanitizeExactPdfFsName(itemName);
+    if (nameSanitized && nameSanitized === fileSanitized) return 1.0;
+  }
+
+  return 0;
 }
 
 export async function getDetailedNativePermissionStatus(): Promise<NoorPermissionStatus> {
@@ -781,7 +823,7 @@ export async function autoScanDownloadsWithCapacitor(
             (item.videoUrls && item.videoUrls.find((u) => Boolean(u?.trim()))) ||
             item.videoUrl ||
             '';
-          if (!primaryVideoUrl && !item.pdfUrl && !itemHasExplicitVideoFileName(item)) continue;
+          if (!primaryVideoUrl && !item.pdfUrl && !itemHasExplicitVideoFileName(item) && !item.pdfFileName?.trim()) continue;
           classIndex += 1;
           catalogItems.push({
             subject,
@@ -822,7 +864,6 @@ export async function autoScanDownloadsWithCapacitor(
       const { subject, sectionTitle, classIndex, item, primaryVideoUrl } = catalogItems[idx];
 
       const videoUrlHint = extractUrlHint(primaryVideoUrl);
-      const pdfUrlHint = extractUrlHint(item.pdfUrl);
       const subjMeta = subjectMetaById.get(subject.id);
       const subjShort = subjMeta?.shortLabel || '';
 
@@ -846,11 +887,6 @@ export async function autoScanDownloadsWithCapacitor(
 
       const videoNames = videoUrlHint ? [...baseNames, videoUrlHint] : baseNames;
       const explicitPdfName = item.pdfFileName?.trim() || '';
-      const pdfNames = [
-        ...(explicitPdfName ? [explicitPdfName] : []),
-        ...(pdfUrlHint ? [pdfUrlHint] : []),
-        ...baseNames,
-      ];
 
       const allVideoLinks =
         item.videoUrls && item.videoUrls.length > 0
@@ -905,20 +941,11 @@ export async function autoScanDownloadsWithCapacitor(
         }
       }
 
-      // PDFs are always scanned both offline and online
+      // PDFs always scan offline & online using exact full-name matching (only trailing .pdf is optional)
       if (item.pdfUrl || explicitPdfName) {
-        const pdfDriveId = getGoogleDriveFileId(item.pdfUrl);
         for (const pf of pdfFiles) {
-          const score = scoreCandidateMatch(
-            pdfNames,
-            pdfDriveId,
-            undefined,
-            subject.id,
-            sectionTitle,
-            pf,
-            explicitPdfName ? [explicitPdfName] : []
-          );
-          if (score >= 0.8) {
+          const score = scoreExactPdfMatch(item, pf);
+          if (score >= 1.0) {
             pdfCandidates.push({ idx, file: pf, score });
           }
         }
