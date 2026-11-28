@@ -4,6 +4,7 @@ export interface NoorPermissionStatus {
   granted: boolean;
   runtimeGranted: boolean;
   hasAllFilesAccess: boolean;
+  needsAllFilesAccess?: boolean;
   hasSavedFolderTree: boolean;
   needsFolderGrantForPdf: boolean;
   sdkInt?: number;
@@ -77,11 +78,23 @@ export async function checkNativePermissionsDetailed(): Promise<NoorPermissionSt
       granted: true,
       runtimeGranted: true,
       hasAllFilesAccess: true,
+      needsAllFilesAccess: false,
       hasSavedFolderTree: false,
       needsFolderGrantForPdf: false,
     };
   }
-  return await NoorStorage.checkMediaPermissions();
+  try {
+    return await NoorStorage.checkMediaPermissions();
+  } catch {
+    return {
+      granted: false,
+      runtimeGranted: false,
+      hasAllFilesAccess: false,
+      needsAllFilesAccess: false,
+      hasSavedFolderTree: false,
+      needsFolderGrantForPdf: false,
+    };
+  }
 }
 
 export async function requestNativePermissionsDetailed(): Promise<NoorPermissionStatus> {
@@ -90,11 +103,16 @@ export async function requestNativePermissionsDetailed(): Promise<NoorPermission
       granted: true,
       runtimeGranted: true,
       hasAllFilesAccess: true,
+      needsAllFilesAccess: false,
       hasSavedFolderTree: false,
       needsFolderGrantForPdf: false,
     };
   }
-  return await NoorStorage.requestMediaPermissions();
+  try {
+    return await NoorStorage.requestMediaPermissions();
+  } catch {
+    return await checkNativePermissionsDetailed();
+  }
 }
 
 export async function pickNativeDownloadFolder(): Promise<NoorPermissionStatus> {
@@ -103,11 +121,16 @@ export async function pickNativeDownloadFolder(): Promise<NoorPermissionStatus> 
       granted: true,
       runtimeGranted: true,
       hasAllFilesAccess: true,
+      needsAllFilesAccess: false,
       hasSavedFolderTree: false,
       needsFolderGrantForPdf: false,
     };
   }
-  return await NoorStorage.pickPublicFolder();
+  try {
+    return await NoorStorage.pickPublicFolder();
+  } catch {
+    return await checkNativePermissionsDetailed();
+  }
 }
 
 export async function openNativeAllFilesSettings(): Promise<NoorPermissionStatus> {
@@ -116,17 +139,26 @@ export async function openNativeAllFilesSettings(): Promise<NoorPermissionStatus
       granted: true,
       runtimeGranted: true,
       hasAllFilesAccess: true,
+      needsAllFilesAccess: false,
       hasSavedFolderTree: false,
       needsFolderGrantForPdf: false,
     };
   }
-  return await NoorStorage.openAllFilesSettings();
+  try {
+    return await NoorStorage.openAllFilesSettings();
+  } catch {
+    return await checkNativePermissionsDetailed();
+  }
 }
 
 export async function scanNativePublicFiles(): Promise<NoorScannedFileItem[]> {
   if (!isAndroidNative()) return [];
-  const res = await NoorStorage.scanPublicFiles();
-  return Array.isArray(res?.files) ? res.files : [];
+  try {
+    const res = await NoorStorage.scanPublicFiles();
+    return Array.isArray(res?.files) ? res.files : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function saveBase64ToNativePublicStorage(options: {

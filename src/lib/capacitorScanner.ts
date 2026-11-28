@@ -313,6 +313,58 @@ export async function checkNativeStoragePermission(
   }
 }
 
+export function needsAnyStoragePermission(status: NoorPermissionStatus): boolean {
+  if (!isCapacitorNative()) return false;
+  if (!status.runtimeGranted) return true;
+  if (typeof status.sdkInt === 'number' && status.sdkInt >= 30 && !status.hasAllFilesAccess) {
+    return true;
+  }
+  return Boolean(status.needsAllFilesAccess);
+}
+
+export async function requestFullNativeStoragePermission(): Promise<{
+  state: NativeStoragePermissionState;
+  details: NoorPermissionStatus;
+}> {
+  if (!isCapacitorNative()) {
+    const webDetails = await getDetailedNativePermissionStatus();
+    return { state: 'web', details: webDetails };
+  }
+
+  let details = await getDetailedNativePermissionStatus();
+  if (!details.runtimeGranted && isNoorNativeStorageAvailable()) {
+    try {
+      details = await requestNativePermissionsDetailed();
+    } catch {
+      details = await getDetailedNativePermissionStatus();
+    }
+  } else if (!details.runtimeGranted) {
+    try {
+      await Filesystem.requestPermissions();
+      details = await getDetailedNativePermissionStatus();
+    } catch {
+      // Ignore permission dialog cancellation
+    }
+  }
+
+  if (
+    isNoorNativeStorageAvailable() &&
+    ((typeof details.sdkInt === 'number' && details.sdkInt >= 30 && !details.hasAllFilesAccess) ||
+      details.needsAllFilesAccess)
+  ) {
+    try {
+      details = await openNativeAllFilesSettings();
+    } catch {
+      details = await getDetailedNativePermissionStatus();
+    }
+  }
+
+  return {
+    state: details.granted ? 'granted' : 'denied',
+    details,
+  };
+}
+
 export async function requestNativeStoragePermission(): Promise<NativeStoragePermissionState> {
   if (!isCapacitorNative()) {
     return 'web';
@@ -430,8 +482,10 @@ async function collectNativeDownloadFiles(): Promise<ScannedNativeFile[]> {
     { directory: Directory.ExternalStorage, path: 'Download/NOOR ELAHI', scanSubfolders: false },
     { directory: Directory.ExternalStorage, path: 'Download/Noor Elahi', scanSubfolders: false },
     { directory: Directory.ExternalStorage, path: 'Download', scanSubfolders: true },
-    { directory: Directory.ExternalStorage, path: 'Downloads', scanSubfolders: false },
+    { directory: Directory.ExternalStorage, path: 'Downloads', scanSubfolders: true },
     { directory: Directory.ExternalStorage, path: 'Documents/NoorElahi', scanSubfolders: false },
+    { directory: Directory.ExternalStorage, path: 'Documents', scanSubfolders: true },
+    { directory: Directory.ExternalStorage, path: 'Movies', scanSubfolders: true },
     { directory: Directory.Documents, path: 'NoorElahi', scanSubfolders: false },
     { directory: Directory.Documents, path: '', scanSubfolders: true },
   ];
@@ -557,8 +611,26 @@ export async function autoScanDownloadsWithCapacitor(
       const { subject, sectionId, sectionTitle, classIndex, item, primaryVideoUrl } =
         catalogItems[idx];
 
+      const urlFilenameHint = (() => {
+        const candidates = [primaryVideoUrl, item.pdfUrl].filter(Boolean);
+        for (const raw of candidates) {
+          try {
+            const u = new URL(raw);
+            if (u.hostname.includes('drive.google.com') || u.hostname.includes('docs.google.com')) continue;
+            const seg = decodeURIComponent(u.pathname.split('/').pop() || '').trim();
+            if (seg && seg.length >= 4 && !/^(view|preview|download|uc|index\.html)$/i.test(seg)) {
+              return seg;
+            }
+          } catch {
+            // Ignore malformed URL
+          }
+        }
+        return '';
+      })();
+
       const candidateNames = [
         item.name || '',
+        urlFilenameHint,
         `${subject.name} ${item.name || ''}`,
         `${sectionTitle} ${item.name || ''}`,
         `${subject.name} Class ${classIndex}`,

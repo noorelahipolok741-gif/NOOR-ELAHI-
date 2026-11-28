@@ -21,13 +21,19 @@ import {
   getPdfViewerUrl,
   getSafeDownloadUrl,
   normalizeMediaUrl,
+  resolveDownloadProxyUrl,
   resolveStreamUrl,
   safeOpenExternalUrl,
   sanitizeBaseFilename,
   saveOfflineBlobForClass,
   saveToInternalDirectoryIfPermitted,
 } from '../lib/offlineStorage';
-import { isCapacitorNative, readNativePdfAsBlob } from '../lib/capacitorScanner';
+import {
+  downloadRemoteFileToCapacitorPublicStorage,
+  isCapacitorNative,
+  readNativePdfAsBlob,
+} from '../lib/capacitorScanner';
+import { isNoorNativeStorageAvailable } from '../lib/noorStoragePlugin';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
@@ -842,8 +848,51 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     setSaveNotice(null);
     try {
       let targetBlob = pdfBlob;
+
+      // Fast-path on Capacitor APK when PDF blob isn't preloaded (e.g. Drive iframe or error fallback)
+      if (
+        !targetBlob &&
+        isCapacitorNative() &&
+        isNoorNativeStorageAvailable() &&
+        typeof navigator !== 'undefined' &&
+        navigator.onLine &&
+        pdfUrl
+      ) {
+        const proxyDownloadUrl = resolveDownloadProxyUrl(pdfUrl, downloadFilename, 'pdf');
+        if (proxyDownloadUrl) {
+          const nativeDl = await downloadRemoteFileToCapacitorPublicStorage(
+            proxyDownloadUrl,
+            downloadFilename,
+            'application/pdf'
+          );
+          if (nativeDl.saved && nativeDl.uri) {
+            const downloadedBlob = await readNativePdfAsBlob(nativeDl.uri);
+            if (downloadedBlob) {
+              await saveOfflineBlobForClass({
+                itemId,
+                videoName: title,
+                pdfUrl,
+                pdfBlob: downloadedBlob,
+              }).catch(() => {});
+            }
+            onOfflineCached?.({
+              itemId,
+              fileSizeBytes: Number(nativeDl.sizeBytes || downloadedBlob?.size || 0),
+              hasLocalVideo: false,
+              hasLocalPdf: true,
+              localPdfUri: nativeDl.uri,
+              matchedFileName: downloadFilename,
+            });
+            setSaveNotice(
+              `PDF সফলভাবে ফোনের ${nativeDl.folder || 'Download/NoorElahi'} ফোল্ডারে সেভ হয়েছে!`
+            );
+            return;
+          }
+        }
+      }
+
       if (!targetBlob && typeof navigator !== 'undefined' && navigator.onLine && pdfUrl) {
-        const proxyTarget = resolveStreamUrl(normalizeMediaUrl(pdfUrl), 'pdf');
+        const proxyTarget = resolveDownloadProxyUrl(pdfUrl, downloadFilename, 'pdf') || resolveStreamUrl(normalizeMediaUrl(pdfUrl), 'pdf');
         if (proxyTarget) {
           const r = await fetch(proxyTarget);
           if (r.ok) {
@@ -1123,16 +1172,32 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                 </button>
               )}
               {directSaveHref && (
-                <a
-                  href={directSaveHref}
-                  download={blobUrl ? downloadFilename : undefined}
-                  target={blobUrl ? undefined : '_blank'}
-                  rel={blobUrl ? undefined : 'noopener noreferrer'}
-                  className="px-4 py-2.5 rounded-xl bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>PDF সেভ করুন</span>
-                </a>
+                isCapacitorNative() ? (
+                  <button
+                    type="button"
+                    disabled={savingPdf}
+                    onClick={() => void handleSavePdfClick()}
+                    className="px-4 py-2.5 rounded-xl bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-60"
+                  >
+                    {savingPdf ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5" />
+                    )}
+                    <span>{savingPdf ? 'সেভ হচ্ছে' : 'PDF সেভ করুন'}</span>
+                  </button>
+                ) : (
+                  <a
+                    href={directSaveHref}
+                    download={blobUrl ? downloadFilename : undefined}
+                    target={blobUrl ? undefined : '_blank'}
+                    rel={blobUrl ? undefined : 'noopener noreferrer'}
+                    className="px-4 py-2.5 rounded-xl bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>PDF সেভ করুন</span>
+                  </a>
+                )
               )}
               {safePdfUrl && (
                 <>

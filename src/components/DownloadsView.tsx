@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -7,13 +7,11 @@ import {
   ExternalLink,
   FileText,
   FolderSearch,
-  HardDrive,
   Loader2,
   Pause,
   Play,
   RotateCcw,
   ShieldAlert,
-  ShieldCheck,
   Trash2,
   Video,
   X,
@@ -27,12 +25,9 @@ import {
 } from '../types';
 import { downloadManager } from '../lib/downloadManager';
 import {
-  collectFilesFromDirectoryHandle,
   exportOfflineItemToPhone,
   getSafeDownloadUrl,
   getStoragePermissionStatus,
-  requestInternalFolderHandle,
-  scanAndRestoreFilesFromDevice,
   StoragePermissionStatus,
 } from '../lib/offlineStorage';
 import { NativeStoragePermissionState } from '../lib/capacitorScanner';
@@ -104,15 +99,12 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
   };
 
   const [confirmDeleteItem, setConfirmDeleteItem] = useState<DownloadRecord | null>(null);
-  const [showScanPrompt, setShowScanPrompt] = useState(false);
   const [scanResultMsg, setScanResultMsg] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [permModalOpen, setPermModalOpen] = useState(false);
   const [permStatus, setPermStatus] = useState<StoragePermissionStatus | null>(null);
-  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   useBackOverlay(Boolean(confirmDeleteItem), () => setConfirmDeleteItem(null), 'dl-confirm-delete');
-  useBackOverlay(showScanPrompt, () => setShowScanPrompt(false), 'dl-scan-prompt');
   useBackOverlay(permModalOpen, () => setPermModalOpen(false), 'dl-storage-perm');
 
   const refreshPermStatus = () => {
@@ -138,87 +130,29 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
     return allDownloads.filter((d) => d.subjectId === selectedSubjectId);
   }, [allDownloads, selectedSubjectId]);
 
-  const handleScanFiles = async (files: File[]) => {
-    setScanning(true);
-    try {
-      const { restoredCount, matchedRecords } = await scanAndRestoreFilesFromDevice(
-        files,
-        subjects,
-        uid
-      );
-      if (matchedRecords.length > 0) {
-        await onRestoreMatchedRecords(matchedRecords);
-      }
-      setScanResultMsg(
-        restoredCount > 0
-          ? `${restoredCount}টি ডাউনলোড করা ক্লাস ফাইল ভল্টের সাথে মিলিয়ে স্বয়ংক্রিয়ভাবে যুক্ত করা হয়েছে!`
-          : 'ফোনের নির্বাচিত ফোল্ডারে File Vault এর নামের সাথে মিল থাকা কোনো ভিডিও বা PDF পাওয়া যায়নি।'
-      );
-    } catch {
-      setScanResultMsg('ফাইল স্ক্যান করতে সমস্যা হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।');
-    } finally {
-      setScanning(false);
-    }
-  };
-
   const triggerDeviceStorageScan = async () => {
-    setShowScanPrompt(false);
+    if (scanning || scanProgress?.active) return;
 
-    if (isNativeCapacitor && onTriggerAutoScan) {
+    if (onTriggerAutoScan) {
       setScanning(true);
       setScanResultMsg(null);
       try {
         const { scannedFilesCount, matchedCount } = await onTriggerAutoScan();
         setScanResultMsg(
           matchedCount > 0
-            ? `ফোন স্টোরেজ (${scannedFilesCount}টি ফাইল) স্ক্যান করে ${matchedCount}টি ডাউনলোড করা ক্লাস মাই ডাউনলোডস ও সংশ্লিষ্ট বিষয়ে যুক্ত করা হয়েছে!`
-            : `ফোন স্টোরেজ স্ক্যান সম্পন্ন হয়েছে (${scannedFilesCount}টি ফাইল পরীক্ষা করা হয়েছে), তবে File Vault-এর নামের সাথে মিল থাকা কোনো নতুন ভিডিও বা PDF পাওয়া যায়নি।`
+            ? `ফোন স্টোরেজ (${scannedFilesCount}টি ফাইল) অটো স্ক্যান করে ${matchedCount}টি ডাউনলোড করা ক্লাস মাই ডাউনলোডস ও সংশ্লিষ্ট বিষয়ে যুক্ত করা হয়েছে!`
+            : `ফোন স্টোরেজ অটো স্ক্যান সম্পন্ন হয়েছে (${scannedFilesCount}টি ফাইল পরীক্ষা করা হয়েছে), তবে File Vault-এর নামের সাথে মিল থাকা কোনো নতুন ভিডিও বা PDF পাওয়া যায়নি।`
         );
       } catch {
         setScanResultMsg('ফোনের স্টোরেজ স্ক্যান করতে সমস্যা হয়েছে। অনুগ্রহ করে পারমিশন পরীক্ষা করুন।');
       } finally {
         setScanning(false);
       }
-      return;
     }
-
-    const win = window as unknown as {
-      showDirectoryPicker?: (opts?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
-    };
-    if (win.showDirectoryPicker) {
-      try {
-        const handle = await requestInternalFolderHandle();
-        if (handle) {
-          refreshPermStatus();
-          setScanning(true);
-          const files = await collectFilesFromDirectoryHandle(handle);
-          await handleScanFiles(files);
-          return;
-        }
-      } catch {
-        // User cancelled or browser fell back
-      }
-    }
-    folderInputRef.current?.click();
   };
 
   return (
     <div className="space-y-5">
-      {/* Hidden Fallback Multi-File / Directory Picker */}
-      <input
-        ref={folderInputRef}
-        type="file"
-        multiple
-        accept="video/*,application/pdf,.mp4,.mkv,.webm,.pdf"
-        onChange={(e) => {
-          const list = e.target.files ? Array.from(e.target.files) : [];
-          if (list.length > 0) {
-            handleScanFiles(list);
-          }
-        }}
-        className="hidden"
-      />
-
       {/* Storage & Scan Header Card */}
       <div className="rounded-3xl bg-slate-900/80 border border-slate-800 p-4 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -232,7 +166,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
             <button
               type="button"
               disabled={scanning || Boolean(scanProgress?.active)}
-              onClick={() => setShowScanPrompt(true)}
+              onClick={() => void triggerDeviceStorageScan()}
               className="h-10 px-4 rounded-2xl bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 border border-emerald-500/40 text-emerald-300 font-semibold text-xs flex items-center justify-center gap-1.5 hover:border-emerald-400 transition shrink-0 disabled:opacity-60"
             >
               {scanning || scanProgress?.active ? (
@@ -241,7 +175,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                 <FolderSearch className="w-4 h-4 shrink-0" />
               )}
               <span>
-                {scanning || scanProgress?.active ? 'স্ক্যান হচ্ছে...' : 'মোবাইল স্টোরেজ স্ক্যান করুন'}
+                {scanning || scanProgress?.active ? 'অটো স্ক্যান হচ্ছে...' : 'অটো স্ক্যান করুন'}
               </span>
             </button>
           </div>
@@ -272,24 +206,6 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
               পারমিশন দাও
             </button>
           )}
-        </div>
-      )}
-
-      {isNativeCapacitor && storagePermission !== 'denied' && needsFolderGrantForPdf && onRequestDownloadFolderAccess && (
-        <div className="rounded-2xl bg-slate-900/95 border border-cyan-500/40 px-3.5 py-3 flex items-center justify-between gap-3 text-xs text-cyan-200">
-          <div className="flex items-center gap-2 min-w-0">
-            <FolderSearch className="w-4 h-4 text-cyan-400 shrink-0" />
-            <span className="min-w-0 leading-relaxed">
-              আগের ডাউনলোড করা PDF ও ভিডিও স্বয়ংক্রিয়ভাবে পুনরুদ্ধার করতে Download ফোল্ডার বেছে দিন
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={() => void onRequestDownloadFolderAccess()}
-            className="shrink-0 px-3 py-1.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs"
-          >
-            ফোল্ডার দিন
-          </button>
         </div>
       )}
 
@@ -608,52 +524,6 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                 className="flex-1 py-2.5 rounded-xl bg-rose-500 text-white text-sm font-semibold"
               >
                 ডিলিট করুন
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* File & Media Permission Modal before Scanning */}
-      {showScanPrompt && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-          <div className="w-full max-w-sm rounded-3xl bg-slate-900 border border-slate-800 p-6 space-y-4 shadow-2xl">
-            <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
-                <FolderSearch className="w-5 h-5 text-emerald-400" />
-              </div>
-              <h3 className="text-base font-bold text-white">ফাইল ও মিডিয়া অনুমতি</h3>
-            </div>
-            <p className="text-sm text-slate-300 leading-relaxed">
-              আপনার ফোনের ইন্টারনাল স্টোরেজে আগে থেকে ডাউনলোড করা ভিডিও এবং PDF স্ক্যান করতে ফোল্ডার বা ফাইল নির্বাচন করার অনুমতি দিন। File Vault এর নামের সাথে মিল পেলে সেগুলো স্বয়ংক্রিয়ভাবে মাই ডাউনলোডসে যুক্ত হয়ে যাবে।
-            </p>
-            {isNativeCapacitor && needsFolderGrantForPdf && onRequestDownloadFolderAccess && (
-              <button
-                type="button"
-                onClick={async () => {
-                  setShowScanPrompt(false);
-                  await onRequestDownloadFolderAccess();
-                }}
-                className="w-full py-2.5 px-3 rounded-xl bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 text-xs font-bold flex items-center justify-center gap-2"
-              >
-                <FolderSearch className="w-4 h-4 text-cyan-300 shrink-0" />
-                <span>Download ফোল্ডার বেছে দিন (পুরোনো PDF সহ)</span>
-              </button>
-            )}
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => setShowScanPrompt(false)}
-                className="flex-1 py-2.5 rounded-xl bg-slate-800 text-slate-300 text-sm font-semibold"
-              >
-                বাতিল
-              </button>
-              <button
-                type="button"
-                onClick={triggerDeviceStorageScan}
-                className="flex-1 py-2.5 rounded-xl bg-emerald-500 text-slate-950 text-sm font-bold"
-              >
-                অটো স্ক্যান করুন
               </button>
             </div>
           </div>

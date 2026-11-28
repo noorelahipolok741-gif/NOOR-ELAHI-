@@ -232,24 +232,6 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
           </div>
         )}
 
-        {isNativeCapacitor && storagePermission !== 'denied' && needsFolderGrantForPdf && onRequestDownloadFolderAccess && (
-          <div className="rounded-2xl bg-slate-900/95 border border-cyan-500/40 px-3.5 py-3 flex items-center justify-between gap-3 text-xs text-cyan-200">
-            <div className="flex items-center gap-2 min-w-0">
-              <ShieldAlert className="w-4 h-4 text-cyan-400 shrink-0" />
-              <span className="min-w-0 leading-relaxed">
-                আগের ডাউনলোড করা PDF ও ভিডিও অটো স্ক্যান করতে Download ফোল্ডারের অনুমতি দিন
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => void onRequestDownloadFolderAccess()}
-              className="shrink-0 px-3 py-1.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs"
-            >
-              ফোল্ডার দিন
-            </button>
-          </div>
-        )}
-
         {scanProgress?.active && (
           <div className="rounded-2xl bg-slate-900/90 border border-cyan-500/30 px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs text-cyan-300">
             <div className="flex items-center gap-2 min-w-0">

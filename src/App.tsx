@@ -61,8 +61,9 @@ import {
   getDetailedNativePermissionStatus,
   isCapacitorNative,
   NativeStoragePermissionState,
+  needsAnyStoragePermission,
+  requestFullNativeStoragePermission,
   requestNativeDownloadFolderAccess,
-  requestNativeStoragePermission,
 } from './lib/capacitorScanner';
 import { apiUrl } from './lib/api';
 import { downloadManager } from './lib/downloadManager';
@@ -74,6 +75,7 @@ import {
   serializeNotificationsForCache,
 } from './lib/notifications';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
+import { handleTopOverlayBack } from './hooks/useBackHandler';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthSuitcaseScreen } from './components/AuthSuitcaseScreen';
 import { SubjectsView } from './components/SubjectsView';
@@ -217,7 +219,10 @@ function AppContent() {
   const [nav, setNav] = useState<NavState>(ROOT_NAV);
   const navRef = useRef<NavState>(ROOT_NAV);
   navRef.current = nav;
+  const appUserRef = useRef<AppUser | null>(appUser);
+  appUserRef.current = appUser;
   const historySeqRef = useRef<number>(0);
+  const lastExitBackPressRef = useRef<number>(0);
 
   const {
     activeTab,
@@ -267,6 +272,8 @@ function AppContent() {
     isCapacitorNative() ? 'granted' : 'web'
   );
   const [needsFolderGrantForPdf, setNeedsFolderGrantForPdf] = useState(false);
+  const [needsTopPermissionGrant, setNeedsTopPermissionGrant] = useState(false);
+  const [requestingStoragePerm, setRequestingStoragePerm] = useState(false);
   const [scanProgress, setScanProgress] = useState<{
     active: boolean;
     scanned: number;
@@ -389,6 +396,81 @@ function AppContent() {
       setTopBanner((curr) => (curr === msg ? null : curr));
     }, 4000);
   }, []);
+
+  useEffect(() => {
+    const win = window as unknown as {
+      __noorHandleNativeBack?: () => 'handled' | 'exit';
+    };
+    win.__noorHandleNativeBack = () => {
+      if (handleTopOverlayBack()) {
+        return 'handled';
+      }
+
+      const curr = navRef.current;
+      if (curr.reportModalOpen) {
+        goBackOr((p) => ({ ...p, reportModalOpen: false }));
+        return 'handled';
+      }
+      if (curr.offlineModalOpen) {
+        goBackOr((p) => ({ ...p, offlineModalOpen: false }));
+        return 'handled';
+      }
+      if (curr.notifOpen) {
+        goBackOr((p) => ({ ...p, notifOpen: false }));
+        return 'handled';
+      }
+      if (curr.activePdf) {
+        goBackOr((p) => ({ ...p, activePdf: null }));
+        return 'handled';
+      }
+      if (curr.activeVideo) {
+        goBackOr((p) => ({ ...p, activeVideo: null }));
+        return 'handled';
+      }
+      if (curr.inboxOpen) {
+        goBackOr((p) => ({ ...p, inboxOpen: false }));
+        return 'handled';
+      }
+      if (curr.vaultOpen && curr.vaultSubjectId) {
+        goBackOr((p) => ({ ...p, vaultSubjectId: null }));
+        return 'handled';
+      }
+      if (curr.vaultOpen) {
+        goBackOr((p) => ({ ...p, vaultOpen: false }));
+        return 'handled';
+      }
+
+      if (appUserRef.current) {
+        if (curr.activeTab === 'subjects' && curr.subjectId) {
+          goBackOr((p) => ({ ...p, subjectId: null }));
+          return 'handled';
+        }
+        if (curr.activeTab === 'downloads' && curr.downloadSubjectId) {
+          goBackOr((p) => ({ ...p, downloadSubjectId: null }));
+          return 'handled';
+        }
+        if (curr.activeTab !== 'subjects') {
+          goBackOr((p) => ({ ...p, activeTab: 'subjects' }));
+          return 'handled';
+        }
+      }
+
+      const now = Date.now();
+      if (now - lastExitBackPressRef.current < 2200) {
+        lastExitBackPressRef.current = 0;
+        return 'exit';
+      }
+      lastExitBackPressRef.current = now;
+      showBanner('অ্যাপ থেকে বের হতে আবার ব্যাক চাপুন');
+      return 'handled';
+    };
+
+    return () => {
+      if (win.__noorHandleNativeBack) {
+        delete win.__noorHandleNativeBack;
+      }
+    };
+  }, [goBackOr, showBanner]);
 
   // Restore IndexedDB backup caches if localStorage was cleared + safety authReady timer
   useEffect(() => {
@@ -1576,10 +1658,12 @@ function AppContent() {
 
         if (res.permissionDetails) {
           setNeedsFolderGrantForPdf(Boolean(res.permissionDetails.needsFolderGrantForPdf));
+          setNeedsTopPermissionGrant(needsAnyStoragePermission(res.permissionDetails));
         }
 
         if (res.status === 'permission_denied') {
           setStoragePermission('denied');
+          setNeedsTopPermissionGrant(true);
           return { scannedFilesCount: 0, matchedCount: 0 };
         }
 
@@ -1631,23 +1715,50 @@ function AppContent() {
     [appUser, subjects, isNativeCapacitor, handleRestoreMatchedRecords]
   );
 
-  const handleRequestNativePermission = useCallback(async () => {
-    const state = await requestNativeStoragePermission();
-    setStoragePermission(state);
-    const details = await getDetailedNativePermissionStatus();
-    setNeedsFolderGrantForPdf(Boolean(details.needsFolderGrantForPdf));
-    if (state === 'granted') {
-      const { matchedCount } = await runCapacitorAutoScan(false);
-      if (matchedCount > 0) {
-        showBanner(`Download ফোল্ডার থেকে ${matchedCount}টি ক্লাস পাওয়া গেছে!`);
-      }
+  const refreshNativePermissionFlags = useCallback(async () => {
+    if (!isNativeCapacitor) {
+      setStoragePermission('web');
+      setNeedsTopPermissionGrant(false);
+      return;
     }
-  }, [runCapacitorAutoScan, showBanner]);
+    try {
+      const details = await getDetailedNativePermissionStatus();
+      setStoragePermission(details.granted ? 'granted' : 'denied');
+      setNeedsFolderGrantForPdf(Boolean(details.needsFolderGrantForPdf));
+      setNeedsTopPermissionGrant(needsAnyStoragePermission(details));
+    } catch {
+      // Keep app stable on unexpected permission check failure
+    }
+  }, [isNativeCapacitor]);
+
+  const handleRequestNativePermission = useCallback(async () => {
+    if (requestingStoragePerm) return;
+    setRequestingStoragePerm(true);
+    try {
+      const { state, details } = await requestFullNativeStoragePermission();
+      setStoragePermission(state);
+      setNeedsFolderGrantForPdf(Boolean(details.needsFolderGrantForPdf));
+      setNeedsTopPermissionGrant(needsAnyStoragePermission(details));
+      if (state === 'granted') {
+        const { matchedCount } = await runCapacitorAutoScan(false);
+        if (matchedCount > 0) {
+          showBanner(`স্টোরেজ থেকে ${matchedCount}টি ক্লাস অটো স্ক্যানে পাওয়া গেছে!`);
+        } else if (!needsAnyStoragePermission(details)) {
+          showBanner('স্টোরেজ পারমিশন সফলভাবে চালু হয়েছে!');
+        }
+      }
+    } catch {
+      showBanner('পারমিশন সেট করতে সমস্যা হয়েছে — পরে আবার চেষ্টা করুন।');
+    } finally {
+      setRequestingStoragePerm(false);
+    }
+  }, [requestingStoragePerm, runCapacitorAutoScan, showBanner]);
 
   const handleRequestDownloadFolderAccess = useCallback(async () => {
     const res = await requestNativeDownloadFolderAccess();
     const details = await getDetailedNativePermissionStatus();
     setNeedsFolderGrantForPdf(Boolean(details.needsFolderGrantForPdf));
+    setNeedsTopPermissionGrant(needsAnyStoragePermission(details));
     if (res.granted) {
       const { matchedCount } = await runCapacitorAutoScan(false);
       if (matchedCount > 0) {
@@ -1658,33 +1769,41 @@ function AppContent() {
     }
   }, [runCapacitorAutoScan, showBanner]);
 
-  // Automatically trigger Capacitor Download folder scan on launch, network regain, and returning to app (online or offline)
+  // Keep permission flags synchronized & trigger Capacitor auto-scan on launch, focus, and online resume
   useEffect(() => {
     if (!appUser) return;
     let cancelled = false;
 
-    const triggerIfActive = (promptIfNeeded: boolean) => {
+    void refreshNativePermissionFlags();
+
+    const triggerIfOnline = (promptIfNeeded: boolean) => {
       if (cancelled) return;
+      void refreshNativePermissionFlags();
+      if (!isOnline && typeof navigator !== 'undefined' && !navigator.onLine) {
+        return;
+      }
       void runCapacitorAutoScan(promptIfNeeded);
     };
 
     const timer = window.setTimeout(() => {
-      triggerIfActive(isOnline);
-    }, 400);
+      triggerIfOnline(isOnline);
+    }, 350);
 
-    const onVisibility = () => {
+    const onVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible') {
-        triggerIfActive(false);
+        triggerIfOnline(false);
       }
     };
 
-    document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener('visibilitychange', onVisibilityOrFocus);
+    window.addEventListener('focus', onVisibilityOrFocus);
     return () => {
       cancelled = true;
       clearTimeout(timer);
-      document.removeEventListener('visibilitychange', onVisibility);
+      document.removeEventListener('visibilitychange', onVisibilityOrFocus);
+      window.removeEventListener('focus', onVisibilityOrFocus);
     };
-  }, [appUser, isOnline, subjects, runCapacitorAutoScan]);
+  }, [appUser, isOnline, subjects, refreshNativePermissionFlags, runCapacitorAutoScan]);
 
   const handleSendIssueReport = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1757,6 +1876,14 @@ function AppContent() {
 
   return (
     <>
+      {/* Top Notification Toast (visible on both Login & Home screens) */}
+      {topBanner && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[80] max-w-md w-[94%] rounded-2xl bg-emerald-500 text-slate-950 px-4 py-3 shadow-2xl flex items-center gap-2.5 text-xs sm:text-sm font-bold">
+          <CheckCircle2 className="w-5 h-5 shrink-0" />
+          <span className="truncate">{topBanner}</span>
+        </div>
+      )}
+
       {!appUser ? (
         <AuthSuitcaseScreen
           onGoogleLogin={handleGoogleLogin}
@@ -1768,13 +1895,6 @@ function AppContent() {
         />
       ) : (
         <div className="h-[100dvh] w-full bg-[#020617] text-slate-100 flex flex-col overflow-hidden overscroll-none">
-          {/* Top Notification Toast */}
-          {topBanner && (
-            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] max-w-md w-[94%] rounded-2xl bg-emerald-500 text-slate-950 px-4 py-3 shadow-2xl flex items-center gap-2.5 text-xs sm:text-sm font-bold">
-              <CheckCircle2 className="w-5 h-5 shrink-0" />
-              <span className="truncate">{topBanner}</span>
-            </div>
-          )}
 
           {/* Top App Bar matching Uploaded Reference Image 2 & 3 */}
           <header className="shrink-0 z-30 h-16 px-4 bg-[#060a17]/95 backdrop-blur-md border-b border-slate-800/80 flex items-center justify-between gap-3">
@@ -1846,6 +1966,28 @@ function AppContent() {
               </button>
             </div>
           </header>
+
+          {/* Persistent Top Permission Action Bar for Android APK whenever storage/all-files permission is not granted */}
+          {isNativeCapacitor && needsTopPermissionGrant && (
+            <div className="shrink-0 z-20 px-4 py-2 bg-amber-500/12 border-b border-amber-500/30 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+                <p className="text-[11px] sm:text-xs font-medium text-amber-100 leading-snug line-clamp-2">
+                  {storagePermission === 'denied'
+                    ? 'ভিডিও/PDF সেভ ও অটো স্ক্যান চালু করতে স্টোরেজ পারমিশন দিন'
+                    : 'ফোনের সব ফোল্ডার ও PDF অটো স্ক্যান করতে সম্পূর্ণ ফাইল পারমিশন দিন'}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={requestingStoragePerm}
+                onClick={() => void handleRequestNativePermission()}
+                className="shrink-0 h-8 px-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-sm active:scale-[0.97] transition disabled:opacity-60"
+              >
+                {requestingStoragePerm ? 'খুলছে...' : 'পারমিশন দিন'}
+              </button>
+            </div>
+          )}
 
           {/* Main Scrollable Viewport (isolated inside 100dvh shell so pull-to-refresh never triggers) */}
           <main className="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain touch-pan-y pwa-scroll-container">
@@ -2240,19 +2382,6 @@ function AppContent() {
                   >
                     <ShieldAlert className="w-4 h-4 shrink-0" />
                     <span>পারমিশন দাও</span>
-                  </button>
-                )}
-                {isNativeCapacitor && storagePermission !== 'denied' && needsFolderGrantForPdf && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      goBackOr((p) => ({ ...p, offlineModalOpen: false }));
-                      void handleRequestDownloadFolderAccess();
-                    }}
-                    className="w-full py-2.5 px-3 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5"
-                  >
-                    <Download className="w-4 h-4 shrink-0" />
-                    <span>Download ফোল্ডার বেছে দিন</span>
                   </button>
                 )}
                 <button

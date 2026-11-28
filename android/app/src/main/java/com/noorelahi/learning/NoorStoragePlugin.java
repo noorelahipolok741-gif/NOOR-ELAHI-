@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.UriPermission;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
@@ -19,6 +20,7 @@ import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.util.Base64;
 import androidx.activity.result.ActivityResult;
+import androidx.core.content.ContextCompat;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.PermissionState;
@@ -83,47 +85,71 @@ public class NoorStoragePlugin extends Plugin {
     }
 
     private boolean isRuntimeMediaPermissionGranted() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (getPermissionState("media33") == PermissionState.GRANTED) {
-                return true;
-            }
+        try {
             Context ctx = getContext();
             if (ctx == null) return false;
-            boolean hasVideo =
-                ctx.checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO) == android.content.pm.PackageManager.PERMISSION_GRANTED;
-            boolean hasVisualSelected =
-                Build.VERSION.SDK_INT >= 34 &&
-                ctx.checkSelfPermission("android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == android.content.pm.PackageManager.PERMISSION_GRANTED;
-            return hasVideo || hasVisualSelected;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                if (getPermissionState("media33") == PermissionState.GRANTED) {
+                    return true;
+                }
+                boolean hasVideo =
+                    ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED;
+                boolean hasVisualSelected =
+                    Build.VERSION.SDK_INT >= 34 &&
+                    ContextCompat.checkSelfPermission(ctx, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED;
+                return hasVideo || hasVisualSelected;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                return (
+                    getPermissionState("legacyRead") == PermissionState.GRANTED ||
+                    ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                );
+            }
+            return (
+                getPermissionState("legacyStorage") == PermissionState.GRANTED ||
+                (
+                    ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+                    ContextCompat.checkSelfPermission(ctx, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                )
+            );
+        } catch (Throwable ignored) {
+            return false;
         }
-        return getPermissionState(getRuntimePermissionAlias()) == PermissionState.GRANTED;
     }
 
     private boolean hasAllFilesAccess() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            return Environment.isExternalStorageManager();
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                return Environment.isExternalStorageManager();
+            }
+            return true;
+        } catch (Throwable ignored) {
+            return false;
         }
-        return true;
     }
 
     private Set<String> getPersistedTreeUriStrings() {
         Set<String> result = new HashSet<>();
         Context ctx = getContext();
         if (ctx == null) return result;
-        List<UriPermission> perms = ctx.getContentResolver().getPersistedUriPermissions();
-        for (UriPermission perm : perms) {
-            if (perm.isReadPermission() && perm.getUri() != null) {
-                result.add(perm.getUri().toString());
-            }
-        }
-        SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        Set<String> saved = prefs.getStringSet(KEY_TREE_URIS, null);
-        if (saved != null) {
-            for (String s : saved) {
-                if (result.contains(s)) {
-                    result.add(s);
+        try {
+            List<UriPermission> perms = ctx.getContentResolver().getPersistedUriPermissions();
+            for (UriPermission perm : perms) {
+                if (perm.isReadPermission() && perm.getUri() != null) {
+                    result.add(perm.getUri().toString());
                 }
             }
+            SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            Set<String> saved = prefs.getStringSet(KEY_TREE_URIS, null);
+            if (saved != null) {
+                for (String s : saved) {
+                    if (result.contains(s)) {
+                        result.add(s);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // Ignore provider issues
         }
         return result;
     }
@@ -131,24 +157,29 @@ public class NoorStoragePlugin extends Plugin {
     private void savePersistedTreeUri(Uri uri) {
         Context ctx = getContext();
         if (ctx == null || uri == null) return;
-        SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        Set<String> existing = new HashSet<>(prefs.getStringSet(KEY_TREE_URIS, new HashSet<>()));
-        existing.add(uri.toString());
-        prefs.edit().putStringSet(KEY_TREE_URIS, existing).apply();
+        try {
+            SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            Set<String> existing = new HashSet<>(prefs.getStringSet(KEY_TREE_URIS, new HashSet<>()));
+            existing.add(uri.toString());
+            prefs.edit().putStringSet(KEY_TREE_URIS, existing).apply();
+        } catch (Throwable ignored) {
+            // Ignore prefs write failure
+        }
     }
 
     private JSObject buildPermissionStatusObject() {
         boolean runtimeGranted = isRuntimeMediaPermissionGranted();
         boolean allFiles = hasAllFilesAccess();
         boolean hasFolderTree = !getPersistedTreeUriStrings().isEmpty();
+        boolean needsAllFilesAccess = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !allFiles;
         boolean granted = runtimeGranted || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && allFiles) || hasFolderTree;
-        boolean needsFolderGrantForPdf =
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !allFiles && !hasFolderTree;
+        boolean needsFolderGrantForPdf = false;
 
         JSObject res = new JSObject();
         res.put("granted", granted);
         res.put("runtimeGranted", runtimeGranted);
         res.put("hasAllFilesAccess", allFiles);
+        res.put("needsAllFilesAccess", needsAllFilesAccess);
         res.put("hasSavedFolderTree", hasFolderTree);
         res.put("needsFolderGrantForPdf", needsFolderGrantForPdf);
         res.put("sdkInt", Build.VERSION.SDK_INT);
@@ -157,46 +188,64 @@ public class NoorStoragePlugin extends Plugin {
 
     @PluginMethod
     public void checkMediaPermissions(PluginCall call) {
-        call.resolve(buildPermissionStatusObject());
+        try {
+            call.resolve(buildPermissionStatusObject());
+        } catch (Throwable t) {
+            call.resolve(new JSObject().put("granted", false).put("runtimeGranted", false));
+        }
     }
 
     @PluginMethod
     public void requestMediaPermissions(PluginCall call) {
-        if (isRuntimeMediaPermissionGranted()) {
+        try {
+            if (isRuntimeMediaPermissionGranted()) {
+                call.resolve(buildPermissionStatusObject());
+                return;
+            }
+            requestPermissionForAlias(getRuntimePermissionAlias(), call, "mediaPermCallback");
+        } catch (Throwable t) {
             call.resolve(buildPermissionStatusObject());
-            return;
         }
-        requestPermissionForAlias(getRuntimePermissionAlias(), call, "mediaPermCallback");
     }
 
     @PermissionCallback
     private void mediaPermCallback(PluginCall call) {
         if (call == null) return;
-        call.resolve(buildPermissionStatusObject());
+        try {
+            call.resolve(buildPermissionStatusObject());
+        } catch (Throwable t) {
+            call.resolve(new JSObject().put("granted", false).put("runtimeGranted", false));
+        }
     }
 
     @PluginMethod
     public void pickPublicFolder(PluginCall call) {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-        intent.addFlags(
-            Intent.FLAG_GRANT_READ_URI_PERMISSION |
-            Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
-            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
-            Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
-        );
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Uri downloadInitialUri = Uri.parse(
-                "content://com.android.externalstorage.documents/document/primary%3ADownload"
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
+                Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
             );
-            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloadInitialUri);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Uri downloadInitialUri = Uri.parse(
+                    "content://com.android.externalstorage.documents/document/primary%3ADownload"
+                );
+                intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, downloadInitialUri);
+            }
+            startActivityForResult(call, intent, "handleFolderPickResult");
+        } catch (Throwable t) {
+            JSObject out = buildPermissionStatusObject();
+            out.put("cancelled", true);
+            call.resolve(out);
         }
-        startActivityForResult(call, intent, "handleFolderPickResult");
     }
 
     @ActivityCallback
     private void handleFolderPickResult(PluginCall call, ActivityResult result) {
         if (call == null) return;
-        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
+        if (result == null || result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
             JSObject out = buildPermissionStatusObject();
             out.put("cancelled", true);
             call.resolve(out);
@@ -207,12 +256,12 @@ public class NoorStoragePlugin extends Plugin {
             int flags = Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
             try {
                 getContext().getContentResolver().takePersistableUriPermission(treeUri, flags);
-            } catch (SecurityException e) {
+            } catch (Throwable e) {
                 try {
                     getContext()
                         .getContentResolver()
                         .takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                } catch (SecurityException ignored) {
+                } catch (Throwable ignored) {
                     // Ignore if persistable permission is unavailable on provider
                 }
             }
@@ -232,15 +281,19 @@ public class NoorStoragePlugin extends Plugin {
             call.resolve(buildPermissionStatusObject());
             return;
         }
+        if (hasAllFilesAccess()) {
+            call.resolve(buildPermissionStatusObject());
+            return;
+        }
         try {
             Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
             intent.setData(Uri.parse("package:" + getContext().getPackageName()));
             startActivityForResult(call, intent, "handleAllFilesSettingsResult");
-        } catch (Exception e) {
+        } catch (Throwable e) {
             try {
                 Intent fallback = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
                 startActivityForResult(call, fallback, "handleAllFilesSettingsResult");
-            } catch (Exception ex) {
+            } catch (Throwable ex) {
                 call.resolve(buildPermissionStatusObject());
             }
         }
@@ -249,7 +302,11 @@ public class NoorStoragePlugin extends Plugin {
     @ActivityCallback
     private void handleAllFilesSettingsResult(PluginCall call, ActivityResult result) {
         if (call == null) return;
-        call.resolve(buildPermissionStatusObject());
+        try {
+            call.resolve(buildPermissionStatusObject());
+        } catch (Throwable t) {
+            call.resolve(new JSObject().put("granted", false).put("runtimeGranted", false));
+        }
     }
 
     private static String sanitizeFilename(String raw) {
@@ -301,6 +358,31 @@ public class NoorStoragePlugin extends Plugin {
         boolean newlyCreatedMediaStoreRow;
     }
 
+    private static String makeUniqueFilename(String safeName) {
+        int dot = safeName.lastIndexOf('.');
+        String suffix = "_" + (System.currentTimeMillis() % 100000L);
+        if (dot > 0) {
+            return safeName.substring(0, dot) + suffix + safeName.substring(dot);
+        }
+        return safeName + suffix;
+    }
+
+    private PublicWriteTarget openAppScopedFallbackTarget(Context ctx, String safeName, String cleanSub)
+        throws IOException {
+        File scopedRoot = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (scopedRoot == null) {
+            scopedRoot = ctx.getFilesDir();
+        }
+        File targetDir = new File(scopedRoot, cleanSub);
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+            throw new IOException("Failed to create app download directory");
+        }
+        PublicWriteTarget target = new PublicWriteTarget();
+        target.legacyFile = new File(targetDir, safeName);
+        target.folderLabel = "App Downloads/" + cleanSub;
+        return target;
+    }
+
     private PublicWriteTarget openPublicDownloadTarget(String safeName, String mimeType, String subfolder)
         throws IOException {
         Context ctx = getContext();
@@ -314,39 +396,79 @@ public class NoorStoragePlugin extends Plugin {
         target.folderLabel = "Download/" + cleanSub;
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ContentResolver resolver = ctx.getContentResolver();
-            String relPath = Environment.DIRECTORY_DOWNLOADS + "/" + cleanSub;
+            try {
+                ContentResolver resolver = ctx.getContentResolver();
+                String relPath = Environment.DIRECTORY_DOWNLOADS + "/" + cleanSub;
 
-            // Reuse/overwrite an existing file owned by our app so we avoid "(1)", "(2)" clutter
-            Uri existingUri = findOwnedMediaStoreDownloadUri(resolver, safeName, relPath);
-            if (existingUri != null) {
-                target.mediaUri = existingUri;
-                target.newlyCreatedMediaStoreRow = false;
-                return target;
+                // Reuse/overwrite an existing file owned by our app so we avoid "(1)", "(2)" clutter
+                Uri existingUri = findOwnedMediaStoreDownloadUri(resolver, safeName, relPath);
+                if (existingUri != null) {
+                    target.mediaUri = existingUri;
+                    target.newlyCreatedMediaStoreRow = false;
+                    return target;
+                }
+
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, safeName);
+                values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+                values.put(MediaStore.Downloads.RELATIVE_PATH, relPath);
+                values.put(MediaStore.Downloads.IS_PENDING, 1);
+
+                Uri inserted = null;
+                try {
+                    inserted = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                } catch (Throwable ignored) {
+                    // Retry with unique filename in case an unowned file from prior install blocks DISPLAY_NAME
+                }
+                if (inserted == null) {
+                    ContentValues retryValues = new ContentValues();
+                    retryValues.put(MediaStore.Downloads.DISPLAY_NAME, makeUniqueFilename(safeName));
+                    retryValues.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+                    retryValues.put(MediaStore.Downloads.RELATIVE_PATH, relPath);
+                    retryValues.put(MediaStore.Downloads.IS_PENDING, 1);
+                    inserted = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, retryValues);
+                }
+
+                if (inserted != null) {
+                    target.mediaUri = inserted;
+                    target.newlyCreatedMediaStoreRow = true;
+                    return target;
+                }
+            } catch (Throwable ignored) {
+                // Fall through to All-Files or app-scoped external storage fallback
             }
 
-            ContentValues values = new ContentValues();
-            values.put(MediaStore.Downloads.DISPLAY_NAME, safeName);
-            values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
-            values.put(MediaStore.Downloads.RELATIVE_PATH, relPath);
-            values.put(MediaStore.Downloads.IS_PENDING, 1);
-
-            Uri inserted = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-            if (inserted == null) {
-                throw new IOException("Failed to create MediaStore download entry");
+            if (hasAllFilesAccess()) {
+                try {
+                    File dlRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                    File noorDir = new File(dlRoot, cleanSub);
+                    if (noorDir.exists() || noorDir.mkdirs()) {
+                        target.legacyFile = new File(noorDir, safeName);
+                        return target;
+                    }
+                } catch (Throwable ignored) {
+                    // Fall through to app-scoped fallback
+                }
             }
-            target.mediaUri = inserted;
-            target.newlyCreatedMediaStoreRow = true;
-            return target;
+            return openAppScopedFallbackTarget(ctx, safeName, cleanSub);
         }
 
-        File dlRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-        File noorDir = new File(dlRoot, cleanSub);
-        if (!noorDir.exists() && !noorDir.mkdirs()) {
-            throw new IOException("Failed to create Download/" + cleanSub);
+        // Android 9 and below (API < 29): check WRITE_EXTERNAL_STORAGE safely without crashing
+        boolean hasLegacyWrite =
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+        if (hasLegacyWrite) {
+            try {
+                File dlRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                File noorDir = new File(dlRoot, cleanSub);
+                if (noorDir.exists() || noorDir.mkdirs()) {
+                    target.legacyFile = new File(noorDir, safeName);
+                    return target;
+                }
+            } catch (Throwable ignored) {
+                // Fall back to app-scoped download folder
+            }
         }
-        target.legacyFile = new File(noorDir, safeName);
-        return target;
+        return openAppScopedFallbackTarget(ctx, safeName, cleanSub);
     }
 
     private Uri findOwnedMediaStoreDownloadUri(ContentResolver resolver, String displayName, String relPath) {
@@ -456,9 +578,9 @@ public class NoorStoragePlugin extends Plugin {
                 res.put("folder", target.folderLabel);
                 res.put("sizeBytes", bytes.length);
                 call.resolve(res);
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 if (target != null) abortPublicTarget(target);
-                call.reject("Failed to save file: " + e.getMessage());
+                call.reject("Failed to save file: " + (e.getMessage() != null ? e.getMessage() : "storage error"));
             }
         });
     }
@@ -487,6 +609,7 @@ public class NoorStoragePlugin extends Plugin {
                     conn.setConnectTimeout(20000);
                     conn.setReadTimeout(45000);
                     conn.setRequestProperty("Accept", "*/*");
+                    conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36");
                     conn.connect();
 
                     int code = conn.getResponseCode();
@@ -582,7 +705,7 @@ public class NoorStoragePlugin extends Plugin {
                 res.put("sizeBytes", downloaded);
                 res.put("mimeType", mimeType);
                 call.resolve(res);
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 if (target != null) abortPublicTarget(target);
                 call.reject(e.getMessage() != null ? e.getMessage() : "Download failed");
             } finally {
@@ -607,6 +730,8 @@ public class NoorStoragePlugin extends Plugin {
             try {
                 Uri uri = Uri.parse(uriStr.trim());
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                final long maxBytes = 64L * 1024L * 1024L;
+                long totalRead = 0L;
                 try (InputStream in = "file".equalsIgnoreCase(uri.getScheme()) && uri.getPath() != null
                     ? new FileInputStream(new File(uri.getPath()))
                     : ctx.getContentResolver().openInputStream(uri)) {
@@ -616,6 +741,10 @@ public class NoorStoragePlugin extends Plugin {
                     byte[] buf = new byte[16384];
                     int read;
                     while ((read = in.read(buf)) != -1) {
+                        totalRead += read;
+                        if (totalRead > maxBytes) {
+                            throw new IOException("File exceeds safe memory limit for inline read");
+                        }
                         baos.write(buf, 0, read);
                     }
                 }
@@ -625,8 +754,8 @@ public class NoorStoragePlugin extends Plugin {
                 res.put("data", b64);
                 res.put("sizeBytes", allBytes.length);
                 call.resolve(res);
-            } catch (Exception e) {
-                call.reject("Failed to read URI: " + e.getMessage());
+            } catch (Throwable e) {
+                call.reject("Failed to read URI: " + (e.getMessage() != null ? e.getMessage() : "read error"));
             }
         });
     }
@@ -834,10 +963,15 @@ public class NoorStoragePlugin extends Plugin {
             new File(extRoot, "Downloads"),
             new File(extRoot, "Documents/NoorElahi"),
             new File(extRoot, "Documents"),
-            new File(extRoot, "Movies/NoorElahi")
+            new File(extRoot, "Movies"),
+            new File(extRoot, "DCIM"),
+            new File(extRoot, "WhatsApp/Media/WhatsApp Documents"),
+            new File(extRoot, "WhatsApp/Media/WhatsApp Video"),
+            new File(extRoot, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents"),
+            new File(extRoot, "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video")
         };
         for (File dir : roots) {
-            scanDirectFolderRecursive(dir, 0, 2, out);
+            scanDirectFolderRecursive(dir, 0, 4, out);
         }
     }
 
@@ -846,8 +980,13 @@ public class NoorStoragePlugin extends Plugin {
         File[] children = dir.listFiles();
         if (children == null) return;
         for (File f : children) {
-            if (f.getName().startsWith(".")) continue;
+            String name = f.getName();
+            if (name.startsWith(".")) continue;
             if (f.isDirectory()) {
+                if ("data".equalsIgnoreCase(name) || "obb".equalsIgnoreCase(name)) {
+                    String parentName = dir.getName();
+                    if ("Android".equalsIgnoreCase(parentName)) continue;
+                }
                 if (depth < maxDepth) {
                     scanDirectFolderRecursive(f, depth + 1, maxDepth, out);
                 }
@@ -866,11 +1005,25 @@ public class NoorStoragePlugin extends Plugin {
         }
     }
 
+    private void scanAppScopedDownloads(Context ctx, Map<String, ScannedEntry> out) {
+        try {
+            File scopedRoot = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (scopedRoot != null) {
+                scanDirectFolderRecursive(scopedRoot, 0, 3, out);
+            }
+        } catch (Throwable ignored) {
+            // Ignore scoped dir read failure
+        }
+    }
+
     @PluginMethod
     public void scanPublicFiles(PluginCall call) {
         Context ctx = getContext();
         if (ctx == null) {
-            call.reject("Context unavailable");
+            JSObject emptyRes = new JSObject();
+            emptyRes.put("files", new JSArray());
+            emptyRes.put("count", 0);
+            call.resolve(emptyRes);
             return;
         }
         executor.execute(() -> {
@@ -878,24 +1031,27 @@ public class NoorStoragePlugin extends Plugin {
                 ContentResolver resolver = ctx.getContentResolver();
                 Map<String, ScannedEntry> dedupMap = new HashMap<>();
 
-                // 1. MediaStore scans (finds all device videos cleanly across reinstalls once READ_MEDIA_VIDEO granted)
-                scanMediaStoreVideos(resolver, dedupMap);
-                scanMediaStoreDownloads(resolver, dedupMap);
-                scanMediaStoreFiles(resolver, dedupMap);
+                // 1. MediaStore scans (zero crash even when partially permitted)
+                try { scanMediaStoreVideos(resolver, dedupMap); } catch (Throwable ignored) {}
+                try { scanMediaStoreDownloads(resolver, dedupMap); } catch (Throwable ignored) {}
+                try { scanMediaStoreFiles(resolver, dedupMap); } catch (Throwable ignored) {}
 
-                // 2. Persisted SAF Trees (finds leftover PDFs AND videos in user-selected Download folder after reinstall)
+                // 2. Persisted SAF Trees (if any previously persisted)
                 for (String treeStr : getPersistedTreeUriStrings()) {
                     try {
                         Uri treeUri = Uri.parse(treeStr);
                         String rootDocId = DocumentsContract.getTreeDocumentId(treeUri);
                         scanSafTreeRecursive(resolver, treeUri, rootDocId, 0, dedupMap);
-                    } catch (Exception ignored) {
+                    } catch (Throwable ignored) {
                         // Skip malformed or revoked tree URI
                     }
                 }
 
-                // 3. Direct filesystem scan (works on Android <= 10 and whenever MANAGE_EXTERNAL_STORAGE is enabled)
-                scanDirectDirectories(dedupMap);
+                // 3. Direct public filesystem scan (Android <= 10 or Android 11+ with All Files Access)
+                try { scanDirectDirectories(dedupMap); } catch (Throwable ignored) {}
+
+                // 4. App-scoped external download fallback (always readable without permissions)
+                scanAppScopedDownloads(ctx, dedupMap);
 
                 JSArray list = new JSArray();
                 for (ScannedEntry entry : dedupMap.values()) {
@@ -912,8 +1068,11 @@ public class NoorStoragePlugin extends Plugin {
                 res.put("files", list);
                 res.put("count", list.length());
                 call.resolve(res);
-            } catch (Exception e) {
-                call.reject("Scan failed: " + e.getMessage());
+            } catch (Throwable e) {
+                JSObject emptyRes = new JSObject();
+                emptyRes.put("files", new JSArray());
+                emptyRes.put("count", 0);
+                call.resolve(emptyRes);
             }
         });
     }
