@@ -41,6 +41,10 @@ jobs:
           keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias AndroidDebugKey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           cp ~/.android/debug.keystore ~/.config/.android/debug.keystore
 
+      - name: Show Keystore Base64 For Secret
+        run: |
+          base64 -w 0 ~/.android/debug.keystore
+
       - name: Show SHA-1
         run: |
           cd android
