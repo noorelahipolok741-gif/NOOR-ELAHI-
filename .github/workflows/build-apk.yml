@@ -39,7 +39,11 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-
+        
+         - name: Show SHA-1
+        run: |
+          cd android
+          ./gradlew signingReport
       - name: Build Debug APK
         run: |
           cd android
