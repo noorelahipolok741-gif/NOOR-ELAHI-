@@ -38,11 +38,13 @@ jobs:
       - name: Show SHA-1
         run: |
           cd android
+          chmod +x gradlew
           ./gradlew signingReport
 
       - name: Build Debug APK
         run: |
           cd android
+          chmod +x gradlew
           ./gradlew assembleDebug
 
       - name: Upload APK Artifact
