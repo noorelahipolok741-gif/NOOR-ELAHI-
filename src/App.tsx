@@ -1419,11 +1419,33 @@ function AppContent() {
       );
     }
 
+    const cleanSections = (subject.sections || []).slice(0, 40).map((sec) => ({
+      ...sec,
+      items: (sec.items || []).map((it) => {
+        const cleanItem: Record<string, unknown> = {
+          id: it.id,
+          name: it.name || '',
+          videoUrl: it.videoUrl || '',
+          videoUrls: it.videoUrls || (it.videoUrl ? [it.videoUrl] : []),
+          videoFileName: it.videoFileName || '',
+          videoFileNames: it.videoFileNames || (it.videoFileName ? [it.videoFileName] : []),
+          pdfUrl: it.pdfUrl || '',
+          pdfFileName: it.pdfFileName || '',
+          duration: it.duration || '',
+          createdAt: it.createdAt || Date.now(),
+        };
+        if (typeof it.expectedSizeMB === 'number' && Number.isFinite(it.expectedSizeMB) && it.expectedSizeMB > 0) {
+          cleanItem.expectedSizeMB = it.expectedSizeMB;
+        }
+        return cleanItem;
+      }),
+    }));
+
     const safeSubject: SubjectDoc = {
       ...subject,
       name: (subject.name || '').slice(0, 120),
       description: (subject.description || '').slice(0, 2000),
-      sections: (subject.sections || []).slice(0, 40),
+      sections: cleanSections as unknown as SubjectDoc['sections'],
     };
 
     // Update local state and offline cache immediately so changes appear everywhere right away
@@ -1685,10 +1707,12 @@ function AppContent() {
         return { scannedFilesCount: 0, matchedCount: 0 };
       }
 
+      const onlineNow = Boolean(isOnline || (typeof navigator !== 'undefined' && navigator.onLine));
       setScanProgress({ active: true, scanned: 0, total: 1, matched: 0 });
       try {
         const res = await autoScanDownloadsWithCapacitor(subjects, appUser.uid, {
           promptPermission,
+          isOnline: onlineNow,
           onProgress: (scanned, total, matched) => {
             setScanProgress({ active: true, scanned, total: Math.max(1, total), matched });
           },
@@ -1708,8 +1732,10 @@ function AppContent() {
         if (res.status === 'granted') {
           setStoragePermission('granted');
           const matchedMap = new Map(res.matchedRecords.map((r) => [r.itemId, r]));
+          const discoveredSet = new Set(res.discoveredUris || []);
 
           // Remove stale native-only markers if file was deleted from device storage, keep IndexedDB blobs
+          // Also preserve existing local URIs when video scanning is deferred offline for nameless videos
           setDownloadsMap((prev) => {
             const next: Record<string, DownloadRecord> = {};
             for (const [id, existing] of Object.entries(prev)) {
@@ -1718,21 +1744,27 @@ function AppContent() {
               const keepIdbPdf = idbPdfIds.has(id);
               if (matched) {
                 next[id] = existing;
-              } else if (existing.localVideoUri || existing.localPdfUri) {
-                if (keepIdbVideo || keepIdbPdf) {
+              } else {
+                const videoStillOnDisk = Boolean(
+                  !onlineNow && existing.localVideoUri && discoveredSet.has(existing.localVideoUri)
+                );
+                const pdfStillOnDisk = Boolean(
+                  existing.localPdfUri && discoveredSet.has(existing.localPdfUri)
+                );
+                if (keepIdbVideo || keepIdbPdf || videoStillOnDisk || pdfStillOnDisk) {
                   const updated: DownloadRecord = {
                     ...existing,
-                    hasLocalVideo: keepIdbVideo,
-                    hasLocalPdf: keepIdbPdf,
+                    hasLocalVideo: keepIdbVideo || videoStillOnDisk,
+                    hasLocalPdf: keepIdbPdf || pdfStillOnDisk,
                   };
-                  delete updated.localVideoUri;
-                  delete updated.localPdfUri;
-                  delete updated.matchedFileName;
-                  delete updated.matchScore;
+                  if (!videoStillOnDisk) delete updated.localVideoUri;
+                  if (!pdfStillOnDisk) delete updated.localPdfUri;
+                  if (!videoStillOnDisk && !pdfStillOnDisk) {
+                    delete updated.matchedFileName;
+                    delete updated.matchScore;
+                  }
                   next[id] = updated;
                 }
-              } else if (keepIdbVideo || keepIdbPdf || existing.hasLocalVideo || existing.hasLocalPdf) {
-                next[id] = existing;
               }
             }
             writeLocalCache(CACHE_DOWNLOADS_KEY, next);
@@ -1756,7 +1788,7 @@ function AppContent() {
         setScanProgress(null);
       }
     },
-    [appUser, subjects, isNativeCapacitor, handleRestoreMatchedRecords]
+    [appUser, subjects, isOnline, isNativeCapacitor, handleRestoreMatchedRecords]
   );
 
   const refreshNativePermissionFlags = useCallback(async () => {
@@ -1813,29 +1845,27 @@ function AppContent() {
     }
   }, [runCapacitorAutoScan, showBanner]);
 
-  // Keep permission flags synchronized & trigger Capacitor auto-scan on launch, focus, and online resume
+  // Keep permission flags synchronized & trigger Capacitor auto-scan on launch, focus, and online/offline resume
   useEffect(() => {
     if (!appUser) return;
     let cancelled = false;
 
     void refreshNativePermissionFlags();
 
-    const triggerIfOnline = (promptIfNeeded: boolean) => {
+    const triggerScan = (promptIfNeeded: boolean) => {
       if (cancelled) return;
       void refreshNativePermissionFlags();
-      if (!isOnline && typeof navigator !== 'undefined' && !navigator.onLine) {
-        return;
-      }
-      void runCapacitorAutoScan(promptIfNeeded);
+      const onlineNow = Boolean(isOnline || (typeof navigator !== 'undefined' && navigator.onLine));
+      void runCapacitorAutoScan(onlineNow ? promptIfNeeded : false);
     };
 
     const timer = window.setTimeout(() => {
-      triggerIfOnline(isOnline);
+      triggerScan(isOnline);
     }, 350);
 
     const onVisibilityOrFocus = () => {
       if (document.visibilityState === 'visible') {
-        triggerIfOnline(false);
+        triggerScan(false);
       }
     };
 
@@ -2065,6 +2095,7 @@ function AppContent() {
                   }}
                   isNativeCapacitor={isNativeCapacitor}
                   storagePermission={storagePermission}
+                  needsAllFilesAccess={needsTopPermissionGrant}
                   needsFolderGrantForPdf={needsFolderGrantForPdf}
                   onRequestStoragePermission={handleRequestNativePermission}
                   onRequestDownloadFolderAccess={handleRequestDownloadFolderAccess}
@@ -2126,6 +2157,7 @@ function AppContent() {
                   onRestoreMatchedRecords={handleRestoreMatchedRecords}
                   isNativeCapacitor={isNativeCapacitor}
                   storagePermission={storagePermission}
+                  needsAllFilesAccess={needsTopPermissionGrant}
                   needsFolderGrantForPdf={needsFolderGrantForPdf}
                   onRequestStoragePermission={handleRequestNativePermission}
                   onRequestDownloadFolderAccess={handleRequestDownloadFolderAccess}

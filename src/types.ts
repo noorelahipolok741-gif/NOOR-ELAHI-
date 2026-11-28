@@ -3,7 +3,10 @@ export interface ClassItem {
   name: string;
   videoUrl?: string;
   videoUrls?: string[];
+  videoFileName?: string;
+  videoFileNames?: string[];
   pdfUrl: string;
+  pdfFileName?: string;
   duration?: string;
   expectedSizeMB?: number;
   createdAt: number;

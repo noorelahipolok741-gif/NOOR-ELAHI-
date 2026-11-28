@@ -49,6 +49,7 @@ interface DownloadsViewProps {
   onRestoreMatchedRecords: (records: DownloadRecord[]) => Promise<void>;
   isNativeCapacitor?: boolean;
   storagePermission?: NativeStoragePermissionState;
+  needsAllFilesAccess?: boolean;
   needsFolderGrantForPdf?: boolean;
   onRequestStoragePermission?: () => Promise<void>;
   onRequestDownloadFolderAccess?: () => Promise<void>;
@@ -81,6 +82,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
   onRestoreMatchedRecords,
   isNativeCapacitor = false,
   storagePermission = 'web',
+  needsAllFilesAccess = false,
   needsFolderGrantForPdf = false,
   onRequestStoragePermission,
   onRequestDownloadFolderAccess,
@@ -147,6 +149,8 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
         setScanResultMsg(
           matchedCount > 0
             ? `ফোন স্টোরেজ (${scannedFilesCount}টি ফাইল) অটো স্ক্যান করে ${matchedCount}টি ডাউনলোড করা ক্লাস মাই ডাউনলোডস ও সংশ্লিষ্ট বিষয়ে যুক্ত করা হয়েছে!`
+            : needsAllFilesAccess
+            ? `ফোন স্টোরেজ স্ক্যান হয়েছে (${scannedFilesCount}টি ফাইল), তবে Chrome/Drive থেকে ডাউনলোড করা PDF পড়তে উপরের "পারমিশন দিন" বাটনে ট্যাপ করে সব ফাইলের অনুমতি দিন।`
             : `ফোন স্টোরেজ অটো স্ক্যান সম্পন্ন হয়েছে (${scannedFilesCount}টি ফাইল পরীক্ষা করা হয়েছে), তবে File Vault-এর নামের সাথে মিল থাকা কোনো নতুন ভিডিও বা PDF পাওয়া যায়নি।`
         );
       } catch {
@@ -195,12 +199,12 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
         )}
       </div>
 
-      {isNativeCapacitor && storagePermission === 'denied' && (
+      {isNativeCapacitor && (storagePermission === 'denied' || needsAllFilesAccess) && (
         <div className="rounded-2xl bg-slate-900/95 border border-amber-500/45 px-3.5 py-3 flex items-center justify-between gap-3 text-xs text-amber-200">
           <div className="flex items-center gap-2 min-w-0">
             <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
             <span className="min-w-0 leading-relaxed">
-              ফোনের ডাউনলোড করা ভিডিও ও PDF অটো-স্ক্যান করতে স্টোরেজ পারমিশন দিন
+              ফোনের ডাউনলোড করা সব PDF ও ভিডিও অটো-স্ক্যান করতে সম্পূর্ণ ফাইল পারমিশন দিন
             </span>
           </div>
           {onRequestStoragePermission && (
@@ -209,7 +213,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
               onClick={() => void onRequestStoragePermission()}
               className="shrink-0 px-3 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
             >
-              পারমিশন দাও
+              পারমিশন দিন
             </button>
           )}
         </div>

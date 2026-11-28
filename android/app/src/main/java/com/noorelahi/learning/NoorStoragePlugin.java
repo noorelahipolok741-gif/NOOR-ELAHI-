@@ -332,9 +332,9 @@ public class NoorStoragePlugin extends Plugin {
     }
 
     private static String detectKind(String filename, String mimeType) {
-        String lowerName = filename == null ? "" : filename.toLowerCase(Locale.ROOT);
-        String lowerMime = mimeType == null ? "" : mimeType.toLowerCase(Locale.ROOT);
-        if (lowerName.endsWith(".pdf") || lowerMime.equals("application/pdf")) {
+        String lowerName = filename == null ? "" : filename.trim().toLowerCase(Locale.ROOT);
+        String lowerMime = mimeType == null ? "" : mimeType.trim().toLowerCase(Locale.ROOT);
+        if (lowerName.endsWith(".pdf") || lowerMime.contains("pdf")) {
             return "pdf";
         }
         if (
@@ -947,41 +947,35 @@ public class NoorStoragePlugin extends Plugin {
 
     private void scanMediaStoreDownloads(ContentResolver resolver, Map<String, ScannedEntry> out) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+        // Avoid MediaStore.Downloads.DATA in primary projection because strict Android 11+ OEM MediaProviders can fail the query
         String[] projection = new String[] {
             MediaStore.Downloads._ID,
             MediaStore.Downloads.DISPLAY_NAME,
             MediaStore.Downloads.SIZE,
             MediaStore.Downloads.MIME_TYPE,
-            MediaStore.Downloads.RELATIVE_PATH,
-            MediaStore.Downloads.DATA
+            MediaStore.Downloads.RELATIVE_PATH
         };
         try (Cursor c = resolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, projection, null, null, null)) {
             if (c == null) return;
             while (c.moveToNext()) {
                 long id = c.getLong(0);
                 String name = c.getString(1);
-                long size = c.getLong(2);
+                long size = c.isNull(2) ? 0L : c.getLong(2);
                 String mime = c.getString(3);
                 String rel = c.getString(4);
-                String dataPath = c.getString(5);
-                if ((name == null || name.trim().isEmpty()) && dataPath != null) {
-                    int slash = dataPath.lastIndexOf('/');
-                    name = slash >= 0 ? dataPath.substring(slash + 1) : dataPath;
+                Uri itemUri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, String.valueOf(id));
+                if (name == null || name.trim().isEmpty()) {
+                    name = queryOpenableDisplayName(resolver, itemUri);
                 }
                 if (name == null || name.trim().isEmpty()) continue;
                 String kind = detectKind(name, mime);
                 if (kind == null) continue;
-                Uri itemUri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI, String.valueOf(id));
                 if (size <= 0) {
                     size = queryOpenableSize(resolver, itemUri);
-                    if (size <= 0 && dataPath != null) {
-                        File f = new File(dataPath);
-                        if (f.exists()) size = f.length();
-                    }
                 }
                 if (!"pdf".equals(kind) && size <= 0) continue;
                 ScannedEntry entry = new ScannedEntry();
-                entry.name = name;
+                entry.name = name.trim();
                 entry.uri = itemUri.toString();
                 entry.sizeBytes = Math.max(0L, size);
                 entry.kind = kind;
@@ -995,49 +989,53 @@ public class NoorStoragePlugin extends Plugin {
 
     private void scanMediaStoreFiles(ContentResolver resolver, Map<String, ScannedEntry> out) {
         Uri filesUri = MediaStore.Files.getContentUri("external");
+        String locCol = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+            ? MediaStore.MediaColumns.RELATIVE_PATH
+            : MediaStore.Files.FileColumns.DATA;
         String[] projection = new String[] {
             MediaStore.Files.FileColumns._ID,
             MediaStore.Files.FileColumns.DISPLAY_NAME,
             MediaStore.Files.FileColumns.SIZE,
             MediaStore.Files.FileColumns.MIME_TYPE,
-            MediaStore.Files.FileColumns.DATA
+            locCol
         };
         String selection =
-            MediaStore.Files.FileColumns.MIME_TYPE + " = ? OR " +
             MediaStore.Files.FileColumns.MIME_TYPE + " LIKE ? OR " +
-            MediaStore.Files.FileColumns.DISPLAY_NAME + " LIKE ? OR " +
-            MediaStore.Files.FileColumns.DATA + " LIKE ?";
-        String[] args = new String[] { "application/pdf", "video/%", "%.pdf", "%.pdf" };
+            MediaStore.Files.FileColumns.MIME_TYPE + " LIKE ? OR " +
+            "LOWER(" + MediaStore.Files.FileColumns.DISPLAY_NAME + ") LIKE ?";
+        String[] args = new String[] { "%pdf%", "video/%", "%.pdf" };
         try (Cursor c = resolver.query(filesUri, projection, selection, args, null)) {
             if (c == null) return;
             while (c.moveToNext()) {
                 long id = c.getLong(0);
                 String name = c.getString(1);
-                long size = c.getLong(2);
+                long size = c.isNull(2) ? 0L : c.getLong(2);
                 String mime = c.getString(3);
-                String dataPath = c.getString(4);
-                if ((name == null || name.isEmpty()) && dataPath != null) {
-                    int slash = dataPath.lastIndexOf('/');
-                    name = slash >= 0 ? dataPath.substring(slash + 1) : dataPath;
+                String loc = c.getString(4);
+                Uri itemUri = Uri.withAppendedPath(filesUri, String.valueOf(id));
+                if ((name == null || name.trim().isEmpty()) && loc != null && loc.contains("/")) {
+                    int slash = loc.lastIndexOf('/');
+                    String candidate = slash >= 0 ? loc.substring(slash + 1) : loc;
+                    if (!candidate.trim().isEmpty() && candidate.contains(".")) {
+                        name = candidate;
+                    }
+                }
+                if (name == null || name.trim().isEmpty()) {
+                    name = queryOpenableDisplayName(resolver, itemUri);
                 }
                 if (name == null || name.trim().isEmpty()) continue;
                 String kind = detectKind(name, mime);
                 if (kind == null) continue;
-                Uri itemUri = Uri.withAppendedPath(filesUri, String.valueOf(id));
                 if (size <= 0) {
                     size = queryOpenableSize(resolver, itemUri);
-                    if (size <= 0 && dataPath != null) {
-                        File f = new File(dataPath);
-                        if (f.exists()) size = f.length();
-                    }
                 }
                 if (!"pdf".equals(kind) && size <= 0) continue;
                 ScannedEntry entry = new ScannedEntry();
-                entry.name = name;
+                entry.name = name.trim();
                 entry.uri = itemUri.toString();
                 entry.sizeBytes = Math.max(0L, size);
                 entry.kind = kind;
-                entry.folder = dataPath != null ? dataPath : "MediaStore/Files";
+                entry.folder = loc != null ? loc : "MediaStore/Files";
                 addDeduped(out, entry);
             }
         } catch (Exception ignored) {
@@ -1052,7 +1050,7 @@ public class NoorStoragePlugin extends Plugin {
         int depth,
         Map<String, ScannedEntry> out
     ) {
-        if (depth > 3) return;
+        if (depth > 5) return;
         Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId);
         String[] projection = new String[] {
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -1085,7 +1083,7 @@ public class NoorStoragePlugin extends Plugin {
                 }
 
                 ScannedEntry entry = new ScannedEntry();
-                entry.name = name;
+                entry.name = name.trim();
                 entry.uri = docUri.toString();
                 entry.sizeBytes = Math.max(0L, size);
                 entry.kind = kind;
@@ -1095,6 +1093,17 @@ public class NoorStoragePlugin extends Plugin {
         } catch (Exception ignored) {
             // Ignore inaccessible subfolder
         }
+    }
+
+    private String queryOpenableDisplayName(ContentResolver resolver, Uri uri) {
+        try (Cursor c = resolver.query(uri, new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) {
+                return c.getString(0);
+            }
+        } catch (Exception ignored) {
+            // Ignore
+        }
+        return null;
     }
 
     private long queryOpenableSize(ContentResolver resolver, Uri uri) {
@@ -1121,6 +1130,8 @@ public class NoorStoragePlugin extends Plugin {
                 new File(extRoot, "Download/NoorElahi"),
                 new File(extRoot, "Download/NOOR ELAHI"),
                 new File(extRoot, "Download/Noor Elahi"),
+                new File(extRoot, "Download/Chrome"),
+                new File(extRoot, "Download/Browser"),
                 new File(extRoot, "Download/Telegram"),
                 new File(extRoot, "Download"),
                 new File(extRoot, "Downloads"),

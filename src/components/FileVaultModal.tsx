@@ -242,7 +242,11 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                   id: makeId('cls'),
                   name: '',
                   videoUrl: '',
+                  videoUrls: [''],
+                  videoFileName: '',
+                  videoFileNames: [''],
                   pdfUrl: '',
+                  pdfFileName: '',
                   duration: '',
                   createdAt: Date.now(),
                 },
@@ -326,13 +330,57 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
               ...sec,
               items: sec.items.map((it) => {
                 if (it.id !== itemId) return it;
-                const existingUrls = it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                const existingUrls =
+                  it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                const existingNames =
+                  it.videoFileNames && it.videoFileNames.length > 0
+                    ? [...it.videoFileNames]
+                    : [it.videoFileName || ''];
                 while (existingUrls.length <= vIdx) existingUrls.push('');
+                while (existingNames.length < existingUrls.length) existingNames.push('');
                 existingUrls[vIdx] = val;
                 return {
                   ...it,
                   videoUrl: existingUrls[0] || '',
-                  videoUrls: existingUrls.filter(Boolean),
+                  videoUrls: existingUrls,
+                  videoFileName: existingNames[0] || '',
+                  videoFileNames: existingNames,
+                };
+              }),
+            }
+          : sec
+      )
+    );
+  };
+
+  const updateVideoFileNameIndex = (
+    sectionId: string,
+    itemId: string,
+    vIdx: number,
+    val: string
+  ) => {
+    setDraftSections((prev) =>
+      prev.map((sec) =>
+        sec.id === sectionId
+          ? {
+              ...sec,
+              items: sec.items.map((it) => {
+                if (it.id !== itemId) return it;
+                const existingUrls =
+                  it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                const existingNames =
+                  it.videoFileNames && it.videoFileNames.length > 0
+                    ? [...it.videoFileNames]
+                    : [it.videoFileName || ''];
+                while (existingNames.length <= vIdx) existingNames.push('');
+                while (existingUrls.length < existingNames.length) existingUrls.push('');
+                existingNames[vIdx] = val;
+                return {
+                  ...it,
+                  videoUrl: existingUrls[0] || '',
+                  videoUrls: existingUrls,
+                  videoFileName: existingNames[0] || '',
+                  videoFileNames: existingNames,
                 };
               }),
             }
@@ -349,10 +397,17 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
               ...sec,
               items: sec.items.map((it) => {
                 if (it.id !== itemId) return it;
-                const existingUrls = it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                const existingUrls =
+                  it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                const existingNames =
+                  it.videoFileNames && it.videoFileNames.length > 0
+                    ? [...it.videoFileNames]
+                    : [it.videoFileName || ''];
+                while (existingNames.length < existingUrls.length) existingNames.push('');
                 return {
                   ...it,
                   videoUrls: [...existingUrls, ''],
+                  videoFileNames: [...existingNames, ''],
                 };
               }),
             }
@@ -369,12 +424,23 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
               ...sec,
               items: sec.items.map((it) => {
                 if (it.id !== itemId) return it;
-                const existingUrls = it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                const existingUrls =
+                  it.videoUrls && it.videoUrls.length > 0 ? [...it.videoUrls] : [it.videoUrl || ''];
+                const existingNames =
+                  it.videoFileNames && it.videoFileNames.length > 0
+                    ? [...it.videoFileNames]
+                    : [it.videoFileName || ''];
+                while (existingNames.length < existingUrls.length) existingNames.push('');
                 const nextUrls = existingUrls.filter((_, idx) => idx !== vIdx);
+                const nextNames = existingNames.filter((_, idx) => idx !== vIdx);
+                const safeUrls = nextUrls.length > 0 ? nextUrls : [''];
+                const safeNames = nextNames.length > 0 ? nextNames : [''];
                 return {
                   ...it,
-                  videoUrl: nextUrls[0] || '',
-                  videoUrls: nextUrls.length > 0 ? nextUrls : [''],
+                  videoUrl: safeUrls[0] || '',
+                  videoUrls: safeUrls,
+                  videoFileName: safeNames[0] || '',
+                  videoFileNames: safeNames,
                 };
               }),
             }
@@ -395,20 +461,41 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
       const normalizedSections: SubjectSection[] = draftSections.map((sec) => ({
         ...sec,
         items: (sec.items || []).map((it) => {
-          const rawUrls = it.videoUrls && it.videoUrls.length > 0 ? it.videoUrls : [it.videoUrl || ''];
-          const normalizedVideoUrls = rawUrls.map((u) => (u?.trim() ? normalizeMediaUrl(u) : '')).filter(Boolean);
-          return {
-            ...it,
-            name: it.name.trim(),
+          const rawUrls =
+            it.videoUrls && it.videoUrls.length > 0 ? it.videoUrls : [it.videoUrl || ''];
+          const rawNames =
+            it.videoFileNames && it.videoFileNames.length > 0
+              ? it.videoFileNames
+              : [it.videoFileName || ''];
+          const maxLen = Math.max(rawUrls.length, rawNames.length);
+          const normalizedVideoUrls: string[] = [];
+          const normalizedVideoFileNames: string[] = [];
+
+          for (let i = 0; i < maxLen; i += 1) {
+            const urlVal = rawUrls[i]?.trim() ? normalizeMediaUrl(rawUrls[i]) : '';
+            const nameVal = (rawNames[i] || '').trim();
+            if (urlVal || nameVal) {
+              normalizedVideoUrls.push(urlVal);
+              normalizedVideoFileNames.push(nameVal);
+            }
+          }
+
+          const cleanItem: ClassItem = {
+            id: it.id,
+            name: (it.name || '').trim(),
             duration: (it.duration || '').trim(),
-            expectedSizeMB:
-              it.expectedSizeMB && Number(it.expectedSizeMB) > 0
-                ? Number(it.expectedSizeMB)
-                : undefined,
             videoUrl: normalizedVideoUrls[0] || '',
             videoUrls: normalizedVideoUrls,
-            pdfUrl: it.pdfUrl.trim() ? normalizeMediaUrl(it.pdfUrl) : '',
+            videoFileName: normalizedVideoFileNames[0] || '',
+            videoFileNames: normalizedVideoFileNames,
+            pdfUrl: it.pdfUrl?.trim() ? normalizeMediaUrl(it.pdfUrl) : '',
+            pdfFileName: (it.pdfFileName || '').trim(),
+            createdAt: it.createdAt || Date.now(),
           };
+          if (it.expectedSizeMB && Number(it.expectedSizeMB) > 0) {
+            cleanItem.expectedSizeMB = Number(it.expectedSizeMB);
+          }
+          return cleanItem;
         }),
       }));
 
@@ -424,8 +511,16 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
       for (const sec of normalizedSections) {
         for (const it of sec.items) {
           const prev = prevItemMap.get(it.id);
-          const nowHasMedia = Boolean(it.videoUrl?.trim() || (it.videoUrls && it.videoUrls.some(u => u.trim())) || it.pdfUrl?.trim());
-          const prevHadMedia = Boolean(prev?.videoUrl?.trim() || (prev?.videoUrls && prev.videoUrls.some(u => u.trim())) || prev?.pdfUrl?.trim());
+          const nowHasMedia = Boolean(
+            it.videoUrl?.trim() ||
+              (it.videoUrls && it.videoUrls.some((u) => u.trim())) ||
+              it.pdfUrl?.trim()
+          );
+          const prevHadMedia = Boolean(
+            prev?.videoUrl?.trim() ||
+              (prev?.videoUrls && prev.videoUrls.some((u) => u.trim())) ||
+              prev?.pdfUrl?.trim()
+          );
           if (nowHasMedia && !prevHadMedia) {
             addedItems.push({
               sectionTitle: sec.title.trim() || meta.name,
@@ -636,7 +731,14 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
 
                 <div className="space-y-3 pt-1">
                   {section.items.map((item, iIdx) => {
-                    const itemVideoUrls = item.videoUrls && item.videoUrls.length > 0 ? item.videoUrls : [item.videoUrl || ''];
+                    const itemVideoUrls =
+                      item.videoUrls && item.videoUrls.length > 0
+                        ? item.videoUrls
+                        : [item.videoUrl || ''];
+                    const itemVideoFileNames =
+                      item.videoFileNames && item.videoFileNames.length > 0
+                        ? item.videoFileNames
+                        : [item.videoFileName || ''];
                     return (
                     <div
                       key={item.id}
@@ -687,7 +789,7 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
 
                       <div className="space-y-2">
                         <div className="flex items-center justify-between">
-                          <span className="text-xs font-semibold text-emerald-400">ভিডিও লিংকসমূহ (পার্ট অনুযায়ী)</span>
+                          <span className="text-xs font-semibold text-emerald-400">ভিডিও লিংক ও ফাইলের নাম (পার্ট অনুযায়ী)</span>
                           <button
                             type="button"
                             onClick={() => addVideoUrlField(section.id, item.id)}
@@ -698,35 +800,57 @@ export const FileVaultModal: React.FC<FileVaultModalProps> = ({
                           </button>
                         </div>
                         {itemVideoUrls.map((vUrl, vIdx) => (
-                          <div key={vIdx} className="flex items-center gap-2">
+                          <div key={vIdx} className="rounded-xl bg-slate-900/60 border border-slate-800/80 p-2 space-y-1.5">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="url"
+                                value={vUrl}
+                                onChange={(e) => updateVideoUrlIndex(section.id, item.id, vIdx, e.target.value)}
+                                placeholder={`ভিডিও লিংক পার্ট ${vIdx + 1} (Drive / MP4)`}
+                                className="flex-1 h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
+                              />
+                              {itemVideoUrls.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => removeVideoUrlIndex(section.id, item.id, vIdx)}
+                                  className="p-2.5 rounded-xl bg-slate-900 text-rose-400 hover:bg-rose-500/15"
+                                  title="এই ভিডিও লিংকটি মুছুন"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
                             <input
-                              type="url"
-                              value={vUrl}
-                              onChange={(e) => updateVideoUrlIndex(section.id, item.id, vIdx, e.target.value)}
-                              placeholder={`ভিডিও লিংক পার্ট ${vIdx + 1} (Drive / MP4)`}
-                              className="flex-1 h-10 px-3 rounded-xl bg-slate-900 border border-emerald-500/25 focus:border-emerald-400 text-xs text-emerald-200 placeholder:text-slate-500 outline-none"
+                              type="text"
+                              value={itemVideoFileNames[vIdx] || ''}
+                              onChange={(e) =>
+                                updateVideoFileNameIndex(section.id, item.id, vIdx, e.target.value)
+                              }
+                              placeholder={`পার্ট ${vIdx + 1} ভিডিও ফাইলের নাম (দিলে অফলাইনেও স্ক্যান হবে; ফাঁকা রাখলে শুধু অনলাইনে স্ক্যান হবে)`}
+                              className="w-full h-9 px-3 rounded-lg bg-slate-950 border border-cyan-500/25 focus:border-cyan-400 text-xs text-cyan-200 placeholder:text-slate-500 outline-none"
                             />
-                            {itemVideoUrls.length > 1 && (
-                              <button
-                                type="button"
-                                onClick={() => removeVideoUrlIndex(section.id, item.id, vIdx)}
-                                className="p-2.5 rounded-xl bg-slate-900 text-rose-400 hover:bg-rose-500/15"
-                                title="এই ভিডিও লিংকটি মুছুন"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
                           </div>
                         ))}
-                        <input
-                          type="url"
-                          value={item.pdfUrl}
-                          onChange={(e) =>
-                            updateSlotField(section.id, item.id, 'pdfUrl', e.target.value)
-                          }
-                          placeholder="PDF এর লিংক (Drive / Direct PDF)"
-                          className="w-full h-10 px-3 rounded-xl bg-slate-900 border border-indigo-500/25 focus:border-indigo-400 text-xs text-indigo-200 placeholder:text-slate-500 outline-none"
-                        />
+                        <div className="rounded-xl bg-slate-900/60 border border-slate-800/80 p-2 space-y-1.5">
+                          <input
+                            type="url"
+                            value={item.pdfUrl}
+                            onChange={(e) =>
+                              updateSlotField(section.id, item.id, 'pdfUrl', e.target.value)
+                            }
+                            placeholder="PDF এর লিংক (Drive / Direct PDF)"
+                            className="w-full h-10 px-3 rounded-xl bg-slate-900 border border-indigo-500/25 focus:border-indigo-400 text-xs text-indigo-200 placeholder:text-slate-500 outline-none"
+                          />
+                          <input
+                            type="text"
+                            value={item.pdfFileName || ''}
+                            onChange={(e) =>
+                              updateSlotField(section.id, item.id, 'pdfFileName', e.target.value)
+                            }
+                            placeholder="PDF ফাইলের নাম (ঐচ্ছিক, যেমন: Class 1 Sheet.pdf)"
+                            className="w-full h-9 px-3 rounded-lg bg-slate-950 border border-indigo-500/20 focus:border-indigo-400 text-xs text-indigo-200 placeholder:text-slate-500 outline-none"
+                          />
+                        </div>
                       </div>
                     </div>
                   );})}

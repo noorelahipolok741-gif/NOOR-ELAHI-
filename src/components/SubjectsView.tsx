@@ -54,6 +54,7 @@ interface SubjectsViewProps {
   onOfflineAlert: (target?: OfflineTargetPayload) => void;
   isNativeCapacitor?: boolean;
   storagePermission?: NativeStoragePermissionState;
+  needsAllFilesAccess?: boolean;
   needsFolderGrantForPdf?: boolean;
   onRequestStoragePermission?: () => Promise<void>;
   onRequestDownloadFolderAccess?: () => Promise<void>;
@@ -118,6 +119,7 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
   onOfflineAlert,
   isNativeCapacitor = false,
   storagePermission = 'web',
+  needsAllFilesAccess = false,
   needsFolderGrantForPdf = false,
   onRequestStoragePermission,
   onRequestDownloadFolderAccess,
@@ -212,12 +214,12 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
           )}
         </div>
 
-        {isNativeCapacitor && storagePermission === 'denied' && (
+        {isNativeCapacitor && (storagePermission === 'denied' || needsAllFilesAccess) && (
           <div className="rounded-2xl bg-slate-900/95 border border-amber-500/45 px-3.5 py-3 flex items-center justify-between gap-3 text-xs text-amber-200">
             <div className="flex items-center gap-2 min-w-0">
               <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
               <span className="min-w-0 leading-relaxed">
-                Download ফোল্ডার অটো স্ক্যান করতে স্টোরেজ পারমিশন প্রয়োজন — পারমিশন দাও
+                Download ফোল্ডারের সব PDF ও ভিডিও অটো স্ক্যান করতে স্টোরেজ পারমিশন দিন
               </span>
             </div>
             {onRequestStoragePermission && (
@@ -226,7 +228,7 @@ export const SubjectsView: React.FC<SubjectsViewProps> = ({
                 onClick={() => void onRequestStoragePermission()}
                 className="shrink-0 px-3 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs"
               >
-                পারমিশন দাও
+                পারমিশন দিন
               </button>
             )}
           </div>
